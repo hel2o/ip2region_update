@@ -83,15 +83,6 @@ func runFetch(args []string) error {
 	return notImplemented("阶段 1")
 }
 
-func runParse(args []string) error {
-	fs := newFlagSet("parse", "解析 qqwry.dat 并落库")
-	src := fs.String("src", "data/qqwry.dat", "qqwry.dat 路径")
-	db := fs.String("db", "data/ip2region.db", "SQLite 路径")
-	_ = fs.Parse(args)
-	_ = src
-	_ = db
-	return notImplemented("阶段 1")
-}
 
 func runEnrich(args []string) error {
 	fs := newFlagSet("enrich", "调百度接口纠正省市与 ISP")
@@ -125,25 +116,4 @@ func runBuild(args []string) error {
 	return notImplemented("阶段 2")
 }
 
-func runVerify(args []string) error {
-	fs := newFlagSet("verify", "校验段表")
-	txt := fs.String("txt", "build/ip2region.txt", "待校验 txt")
-	golden := fs.String("golden", "testdata/golden/ip2region_20250721_qqwry.xdb", "参考 xdb")
-	samples := fs.Int("samples", 1000, "抽样对拍条数")
-	_ = fs.Parse(args)
-	_ = txt
-	_ = golden
-	_ = samples
-	return notImplemented("阶段 2")
-}
 
-func runLook(args []string) error {
-	fs := newFlagSet("look", "查询单个 IP")
-	db := fs.String("db", "build/ip2region.xdb", "xdb 路径")
-	_ = fs.Parse(args)
-	if fs.NArg() < 1 {
-		return fmt.Errorf("缺少 IP 参数")
-	}
-	_ = db
-	return notImplemented("阶段 2")
-}
