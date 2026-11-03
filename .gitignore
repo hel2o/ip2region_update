@@ -1,0 +1,8 @@
+build/
+_legacy/
+data/*.db
+data/*.db-*
+*.sort
+/ip2region
+/ip2region.exe
+testdata/golden/
