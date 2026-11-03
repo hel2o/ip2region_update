@@ -78,14 +78,6 @@ func notImplemented(phase string) error {
 	return fmt.Errorf("尚未实现（计划在 %s）", phase)
 }
 
-func runFetch(args []string) error {
-	fs := newFlagSet("fetch", "下载最新 qqwry.dat")
-	out := fs.String("out", "data/qqwry.dat", "保存路径")
-	_ = fs.Parse(args)
-	_ = out
-	return notImplemented("阶段 1")
-}
-
 
 
 
