@@ -1,0 +1,100 @@
+package enrich
+
+import (
+	"testing"
+
+	"github.com/hel2o/ip2region/internal/geo"
+	"github.com/hel2o/ip2region/internal/provider"
+)
+
+func seg(start, end uint32, prov, city, isp string) geo.Segment {
+	return geo.Segment{
+		Start: start, End: end, Source: "qqwry",
+		Geo: geo.GeoInfo{Country: "中国", Province: prov, City: city, ISP: isp},
+	}
+}
+
+func TestDecide(t *testing.T) {
+	t.Run("ISP 为空时填充", func(t *testing.T) {
+		segs := []geo.Segment{seg(100, 200, "广东省", "广州", "")}
+		ups, k, conf := decide(segs, &probe{segIdx: []int{0}},
+			provider.Result{Province: "广东省", City: "广州市", ISP: "中国电信"})
+		if len(ups) != 1 || ups[0].ISP == nil || *ups[0].ISP != "中国电信" {
+			t.Fatalf("应填充 ISP: %+v", ups)
+		}
+		if ups[0].Province != nil || ups[0].City != nil {
+			t.Fatalf("省市只差后缀，不该改: %+v", ups[0])
+		}
+		if k.isp != 1 || conf.n != 0 {
+			t.Fatalf("统计不对: %+v conf=%d", k, conf.n)
+		}
+	})
+
+	t.Run("省变了市必须跟着改", func(t *testing.T) {
+		segs := []geo.Segment{seg(100, 200, "广东省", "广州", "中国电信")}
+		ups, k, _ := decide(segs, &probe{segIdx: []int{0}},
+			provider.Result{Province: "广西壮族自治区", City: "南宁市", ISP: "中国电信"})
+		if len(ups) != 1 || ups[0].Province == nil || *ups[0].Province != "广西壮族自治区" {
+			t.Fatalf("应改省: %+v", ups)
+		}
+		if ups[0].City == nil || *ups[0].City != "南宁市" {
+			t.Fatalf("省改了市必须同步: %+v", ups)
+		}
+		if k.prov != 1 || k.city != 1 {
+			t.Fatalf("统计不对: %+v", k)
+		}
+	})
+
+	t.Run("省变了但百度没给市则清空市", func(t *testing.T) {
+		segs := []geo.Segment{seg(100, 200, "广东省", "广州", "")}
+		ups, _, _ := decide(segs, &probe{segIdx: []int{0}},
+			provider.Result{Province: "海南省"})
+		if len(ups) != 1 || ups[0].City == nil || *ups[0].City != "" {
+			t.Fatalf("跨省残留市必须清空: %+v", ups[0])
+		}
+	})
+
+	t.Run("百度没数据时不动", func(t *testing.T) {
+		segs := []geo.Segment{seg(100, 200, "广东省", "广州", "")}
+		ups, _, _ := decide(segs, &probe{segIdx: []int{0}}, provider.Result{Raw: "中国"})
+		if len(ups) != 0 {
+			t.Fatalf("空结果不该产生更新: %+v", ups)
+		}
+	})
+
+	t.Run("ISP 冲突只记录不写", func(t *testing.T) {
+		segs := []geo.Segment{seg(100, 200, "广东省", "广州", "腾讯云")}
+		ups, _, conf := decide(segs, &probe{segIdx: []int{0}},
+			provider.Result{Province: "广东省", City: "广州", ISP: "中国电信"})
+		if len(ups) != 0 {
+			t.Fatalf("冲突不该写库: %+v", ups)
+		}
+		if conf.n != 1 || conf.sample == "" {
+			t.Fatalf("应记录冲突: %+v", conf)
+		}
+	})
+
+	t.Run("同 /24 多段共享一次结果", func(t *testing.T) {
+		segs := []geo.Segment{
+			seg(100, 120, "广东省", "广州", ""),
+			seg(121, 140, "广东省", "广州", ""),
+		}
+		ups, k, _ := decide(segs, &probe{segIdx: []int{0, 1}},
+			provider.Result{Province: "广东省", City: "广州市", ISP: "中国联通"})
+		if len(ups) != 2 || k.isp != 2 {
+			t.Fatalf("两段都应更新: %+v k=%+v", ups, k)
+		}
+	})
+}
+
+func TestTrimAdminSuffix(t *testing.T) {
+	cases := map[string]string{
+		"广州市": "广州", "广州": "广州", "番禺区": "番禺",
+		"内蒙古自治区": "内蒙古", "香港特别行政区": "香港",
+	}
+	for in, want := range cases {
+		if got := trimAdminSuffix(in); got != want {
+			t.Errorf("trimAdminSuffix(%q)=%q want %q", in, got, want)
+		}
+	}
+}

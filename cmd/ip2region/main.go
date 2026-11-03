@@ -84,15 +84,6 @@ func runFetch(args []string) error {
 }
 
 
-func runEnrich(args []string) error {
-	fs := newFlagSet("enrich", "调百度接口纠正省市与 ISP")
-	db := fs.String("db", "data/ip2region.db", "SQLite 路径")
-	qps := fs.Int("qps", 20, "全局请求速率上限")
-	_ = fs.Parse(args)
-	_ = db
-	_ = qps
-	return notImplemented("阶段 3")
-}
 
 func runMerge(args []string) error {
 	fs := newFlagSet("merge", "叠加自定义覆盖并输出最终 txt")

@@ -40,12 +40,37 @@ build/ip2region.xdb
 ## 命令
 
 ```bash
-go run ./cmd/ip2region parse  -src data/qqwry.dat -db data/ip2region.db
-go run ./cmd/ip2region enrich -db data/ip2region.db -qps 20
-go run ./cmd/ip2region merge  -db data/ip2region.db -out build/ip2region.txt
-go run ./cmd/ip2region build  -src build/ip2region.txt -out build/ip2region.xdb
-go run ./cmd/ip2region verify -txt build/ip2region.txt
-go run ./cmd/ip2region look   1.2.3.4
+# 1. 解析 qqwry.dat → 段表（约 10s）
+go run ./cmd/ip2region parse -src data/qqwry.dat -db data/ip2region.db
+
+# 2. 百度增强（可反复跑，命中缓存零请求；Ctrl-C 随时中断，重跑接着来）
+go run ./cmd/ip2region enrich -limit 200 -dry-run     # 试跑 200 次请求
+go run ./cmd/ip2region enrich -qps 30 -workers 8      # 全量约 11 万次请求 / 1 小时
+
+# 3. 生成 xdb（约 10s）
+go run ./cmd/ip2region build -out build/ip2region.xdb
+
+# 4. 校验 + 与旧库对拍
+go run ./cmd/ip2region verify -n 50000
+
+# 5. 查询
+go run ./cmd/ip2region look -xdb build/ip2region.xdb 183.3.149.185
+```
+
+### enrich 的规则（别改错方向）
+
+- 区/镇 **永不改**，只认 qqwry
+- 省/市：百度非空且与 qqwry 不同才改；改省时市必须同步（否则会留下跨省组合）
+- ISP：只在原有为空时填充；两边都有值但不同**只记冲突不写库**
+  （qqwry 的"腾讯云/网宿"比百度的"电信"更细）
+- 同 /24 共用一次查询结果（`-mask /16` 可再放大，`none` 关闭去重）
+- 冲突样例写到 `build/enrich-conflicts.tsv`，可人工抽检
+
+实测效果（1.12.0.0/14 段，qqwry 标"广东广州/腾讯云"，百度实测在各地方正宽带）：
+
+```
+增强前: 中国|广东省|广州|||腾讯云
+增强后: 中国|北京市|北京市|||腾讯云      ← 地理位置被纠正，归属方信息保留
 ```
 
 ## 自定义覆盖
@@ -82,9 +107,9 @@ cmd/ip2region/     唯一入口，子命令分发
 internal/geo/      GeoInfo / Segment / 区间运算（覆盖、合并、校验）
 internal/qqwry/    dat 解析
 internal/store/    SQLite 持久化
-internal/provider/ 百度等外部数据源
-internal/enrich/   采样收敛、限流、断点
-internal/xdbbuild/ 官方 maker 封装
+internal/provider/ 百度 opendata 接口（可插拔，换高德/ip138 只加一个文件）
+internal/enrich/   /24 去重、限流、缓存复用、冲突裁定
+internal/xdbmaker/ 官方 maker + searcher（Apache 2.0，收编进仓库自包含）
 data/              qqwry.dat、custom 覆盖表
 testdata/golden/   回归基准
 _legacy/           旧实现归档（不进编译，已 gitignore）
