@@ -283,6 +283,13 @@ type confInfo struct {
 	sample string
 }
 
+// SameGeo 判断两次查询结果是否指向同一省市（忽略 市/区 后缀差异与空值）。
+// 供 refine 判断"三点是否一致"，两侧都为空也算一致（都无数据）。
+func SameGeo(a, b provider.Result) bool {
+	return trimAdminSuffix(a.Province) == trimAdminSuffix(b.Province) &&
+		trimAdminSuffix(a.City) == trimAdminSuffix(b.City)
+}
+
 // sameName 比较行政区名，忽略 市/区/县 等后缀差异。
 // qqwry 存 "广州"，百度给 "广州市"，不是真实差异，不该触发全表改写。
 func sameName(a, b string) bool {

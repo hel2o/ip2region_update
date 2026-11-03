@@ -17,6 +17,7 @@ const usage = `ip2region 构建工具
   fetch     下载最新 qqwry.dat 到 data/qqwry.dat
   parse     解析 qqwry.dat，规范化后写入 SQLite 段表
   enrich    调百度接口纠正省市与 ISP（带缓存、限流、断点续跑）
+  refine    对大段做二分收敛细分
   merge     叠加自定义 CIDR 覆盖，输出最终 txt
   build     调 xdb maker 生成 .xdb
   verify    校验段表连续性/全覆盖，并与参考 xdb 抽样对拍
@@ -42,6 +43,8 @@ func main() {
 		err = runParse(args)
 	case "enrich":
 		err = runEnrich(args)
+	case "refine":
+		err = runRefine(args)
 	case "merge":
 		err = runMerge(args)
 	case "build":
@@ -84,18 +87,6 @@ func runFetch(args []string) error {
 }
 
 
-
-func runMerge(args []string) error {
-	fs := newFlagSet("merge", "叠加自定义覆盖并输出最终 txt")
-	db := fs.String("db", "data/ip2region.db", "SQLite 路径")
-	custom := fs.String("custom", "data/custom", "自定义 CIDR 目录")
-	out := fs.String("out", "build/ip2region.txt", "输出 txt")
-	_ = fs.Parse(args)
-	_ = db
-	_ = custom
-	_ = out
-	return notImplemented("阶段 5")
-}
 
 
 

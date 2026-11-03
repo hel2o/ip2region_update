@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/hel2o/ip2region/internal/geo"
 )
 
 // CachedResult 是 ip_cache 表的一行。
@@ -69,6 +71,41 @@ func (s *DB) CountCache(provider string) (int, error) {
 	var n int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM ip_cache WHERE provider = ?", provider).Scan(&n)
 	return n, err
+}
+
+// ReplaceSegment 用一个连续子段列表替换 [start,end] 范围内的段，
+// 子段必须首尾相接且完全覆盖原范围。整体在一个事务内完成。
+func (s *DB) ReplaceSegment(start, end uint32, pieces []geo.Segment) error {
+	if len(pieces) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM segments WHERE start_ip = ? AND end_ip = ?",
+		int64(start), int64(end)); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO segments
+		(start_ip, end_ip, country, province, city, county, town, isp, source)
+		VALUES (?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, sg := range pieces {
+		if _, err := stmt.Exec(
+			int64(sg.Start), int64(sg.End),
+			sg.Geo.Country, sg.Geo.Province, sg.Geo.City,
+			sg.Geo.County, sg.Geo.Town, sg.Geo.ISP, sg.Source,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SegmentUpdate 是一条段归属更新。

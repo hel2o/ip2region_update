@@ -20,34 +20,44 @@ import (
 func runBuild(args []string) error {
 	fs := newFlagSet("build", "把段表导出 txt 并生成 xdb")
 	dbPath := fs.String("db", "data/ip2region.db", "SQLite 路径")
-	src := fs.String("src", "build/ip2region.txt", "导出的源 txt（保留供检查）")
+	from := fs.String("from", "db", "数据来源: db（导出段表）| txt（用 merge 的产物）")
+	src := fs.String("src", "build/ip2region.txt", "源 txt（--from txt 时为输入，--from db 时为导出路径）")
 	out := fs.String("out", "build/ip2region.xdb", "输出 xdb")
 	policy := fs.String("policy", "vector", "索引策略: vector | btree")
 	_ = fs.Parse(args)
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+	switch *from {
+	case "db":
+		db, err := store.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		segs, err := db.LoadSegments()
+		db.Close()
+		if err != nil {
+			return err
+		}
+		if len(segs) == 0 {
+			return fmt.Errorf("段表为空，请先执行 parse")
+		}
+		log.Printf("载入段表: %d 段", len(segs))
 
-	segs, err := db.LoadSegments()
-	if err != nil {
-		return err
+		if err := os.MkdirAll(filepath.Dir(*src), 0o755); err != nil {
+			return err
+		}
+		nLines, err := exportTxt(segs, *src)
+		if err != nil {
+			return err
+		}
+		log.Printf("导出源 txt: %s (%d 行)", *src, nLines)
+	case "txt":
+		if _, err := os.Stat(*src); err != nil {
+			return fmt.Errorf("源 txt 不可用（先跑 merge）: %w", err)
+		}
+		log.Printf("使用源 txt: %s", *src)
+	default:
+		return fmt.Errorf("非法 --from: %s（支持 db / txt）", *from)
 	}
-	if len(segs) == 0 {
-		return fmt.Errorf("段表为空，请先执行 parse")
-	}
-	log.Printf("载入段表: %d 段", len(segs))
-
-	if err := os.MkdirAll(filepath.Dir(*src), 0o755); err != nil {
-		return err
-	}
-	nLines, err := exportTxt(segs, *src)
-	if err != nil {
-		return err
-	}
-	log.Printf("导出源 txt: %s (%d 行)", *src, nLines)
 
 	idxPolicy, err := xdbmaker.IndexPolicyFromString(*policy)
 	if err != nil {

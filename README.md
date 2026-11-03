@@ -27,11 +27,12 @@
 data/qqwry.dat
    │  parse     GBK→UTF8，拆省市区镇 ISP，规范化成全覆盖段表
    ▼
-data/ip2region.db (SQLite)   ← 段表 + 请求缓存 + 覆盖表，支持断点续跑
-   │  enrich    二分收敛 + 多数投票，只纠正省市/ISP
+data/ip2region.db (SQLite)   ← 段表 + 请求缓存，缓存即断点，重跑零请求
+   │  enrich    全段 /24 去重 + 中点探测，只纠正省市/ISP
+   │  refine    大段二分收敛细分（3 点探测，不一致就切开）
    ▼
 build/ip2region.txt
-   │  merge     叠加 data/custom/*.txt
+   │  merge     叠加 data/custom/*.txt（优先级最高）
    │  build     调官方 maker
    ▼
 build/ip2region.xdb
@@ -47,13 +48,17 @@ go run ./cmd/ip2region parse -src data/qqwry.dat -db data/ip2region.db
 go run ./cmd/ip2region enrich -limit 200 -dry-run     # 试跑 200 次请求
 go run ./cmd/ip2region enrich -qps 30 -workers 8      # 全量约 11 万次请求 / 1 小时
 
-# 3. 生成 xdb（约 10s）
-go run ./cmd/ip2region build -out build/ip2region.xdb
+# 3. 大段细分（只处理 >4096 IP 的段，约 3 次请求/段，可反复跑）
+go run ./cmd/ip2region refine -threshold 4096 -depth 2 -qps 20
 
-# 4. 校验 + 与旧库对拍
+# 4. 叠加自定义覆盖 → txt，并用 txt 生成 xdb
+go run ./cmd/ip2region merge -out build/ip2region.txt
+go run ./cmd/ip2region build -from txt -src build/ip2region.txt -out build/ip2region.xdb
+
+# 5. 校验 + 与旧库对拍
 go run ./cmd/ip2region verify -n 50000
 
-# 5. 查询
+# 6. 查询
 go run ./cmd/ip2region look -xdb build/ip2region.xdb 183.3.149.185
 ```
 
@@ -65,6 +70,12 @@ go run ./cmd/ip2region look -xdb build/ip2region.xdb 183.3.149.185
   （qqwry 的"腾讯云/网宿"比百度的"电信"更细）
 - 同 /24 共用一次查询结果（`-mask /16` 可再放大，`none` 关闭去重）
 - 冲突样例写到 `build/enrich-conflicts.tsv`，可人工抽检
+
+大段为什么必须细分：19 万中国段里有 18,685 段大于 /20，合计覆盖中国 83% 的地址空间。
+只探中点会把一个城市的结论套到几百万个 IP 上。refine 对这类段探 起点/中点/终点，
+三点一致才整段确认，不一致就二分切开（深度受限，最多 4 片）。
+
+实测：`1.15.0.0/16` 原标"天津"，细分后是 北京/北京/北京/大连 四片。
 
 实测效果（1.12.0.0/14 段，qqwry 标"广东广州/腾讯云"，百度实测在各地方正宽带）：
 
@@ -109,6 +120,7 @@ internal/qqwry/    dat 解析
 internal/store/    SQLite 持久化
 internal/provider/ 百度 opendata 接口（可插拔，换高德/ip138 只加一个文件）
 internal/enrich/   /24 去重、限流、缓存复用、冲突裁定
+internal/refine/   大段二分收敛细分
 internal/xdbmaker/ 官方 maker + searcher（Apache 2.0，收编进仓库自包含）
 data/              qqwry.dat、custom 覆盖表
 testdata/golden/   回归基准
