@@ -106,14 +106,5 @@ func runMerge(args []string) error {
 	return notImplemented("阶段 5")
 }
 
-func runBuild(args []string) error {
-	fs := newFlagSet("build", "生成 xdb")
-	src := fs.String("src", "build/ip2region.txt", "输入 txt")
-	out := fs.String("out", "build/ip2region.xdb", "输出 xdb")
-	_ = fs.Parse(args)
-	_ = src
-	_ = out
-	return notImplemented("阶段 2")
-}
 
 

@@ -203,6 +203,24 @@ func indexOfProvince(full string) int {
 	return -1
 }
 
+// ProvinceShort 返回省级全称对应的短名（广东省→广东）；未知名返回空。
+func ProvinceShort(full string) string {
+	if i := indexOfProvince(full); i >= 0 {
+		return provinces[i].alias
+	}
+	return ""
+}
+
+// ProvinceFromShort 把省级短名还原成全称（广东→广东省）；未知返回 false。
+func ProvinceFromShort(short string) (string, bool) {
+	for _, p := range provinces {
+		if p.alias == short {
+			return p.full, true
+		}
+	}
+	return "", false
+}
+
 func joinNonEmpty(a, b string) string {
 	if a == "" {
 		return b
@@ -282,6 +300,19 @@ var ispTable = []struct {
 	{"多线", "BGP多线"},
 }
 
+// ispOrgTable 是云厂商/IDC/DNS 组织名：命中后把整串放进 ISP 字段，
+// 不做归一（如 "阿里巴巴anycast公共DNS"、"谷歌公司DNS服务器" 的描述本身有价值）。
+// 注意避免过短歧义词：苹果会撞北京苹果园/广西平果，故只用 "Apple"。
+var ispOrgTable = []string{
+	"阿里", "腾讯", "谷歌", "Google", "Google", "CloudFlare", "Cloudflare", "CloudFront",
+	"Amazon", "亚马逊", "AWS", "Apple", "微软", "Microsoft", "Azure",
+	"UCloud", "网宿", "蓝汛", "百度", "网易", "字节", "抖音", "快手", "京东",
+	"金山云", "青云", "七牛", "Oracle", "甲骨文", "Fastly", "Akamai",
+	"Linode", "DigitalOcean", "Vultr", "Hetzner", "OVH", "Leaseweb",
+	"Dropbox", "Netflix", "Telegram", "Discord", "Cloudflare",
+	"IDC", "数据中心", "机房",
+}
+
 // NormalizeISP 识别并归一运营商名。返回 false 表示不是运营商串。
 func NormalizeISP(s string) (string, bool) {
 	if s == "" {
@@ -290,6 +321,11 @@ func NormalizeISP(s string) (string, bool) {
 	for _, e := range ispTable {
 		if strings.Contains(s, e.match) {
 			return e.canonical, true
+		}
+	}
+	for _, m := range ispOrgTable {
+		if strings.Contains(s, m) {
+			return s, true
 		}
 	}
 	return "", false
