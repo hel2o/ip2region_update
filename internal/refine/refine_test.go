@@ -42,7 +42,7 @@ func TestRefineSplitsBigSegment(t *testing.T) {
 	segs := []geo.Segment{
 		{Start: 0, End: 0x00FFFFFF, Geo: geo.UnknownGeo, Source: "fill"},
 		{Start: 0x01000000, End: 0x0100FFFF, Source: "qqwry",
-			Geo: geo.GeoInfo{Country: "中国", Province: "天津市", City: "天津市", ISP: "腾讯云"}},
+			Geo: geo.GeoInfo{Country: "中国", Province: "天津市", City: "天津市", ISP: "中国联通"}},
 		{Start: 0x01010000, End: 0xFFFFFFFF, Geo: geo.UnknownGeo, Source: "fill"},
 	}
 	if err := db.SaveSegments(segs); err != nil {
@@ -83,7 +83,7 @@ func TestRefineSplitsBigSegment(t *testing.T) {
 		t.Fatalf("末尾片应是大连市，实际 %+v", last)
 	}
 	for _, sg := range got {
-		if sg.Geo.Country == "中国" && sg.Geo.ISP != "腾讯云" {
+		if sg.Geo.Country == "中国" && sg.Geo.ISP != "中国联通" {
 			t.Fatalf("ISP 不该被覆盖: %+v", sg)
 		}
 	}
@@ -117,6 +117,43 @@ func TestRefineLeavesUniformSegmentAlone(t *testing.T) {
 	}
 	if st.SplitSegs != 0 || st.Confirmed != 1 {
 		t.Fatalf("三点一致应整段确认且不细分: %+v", st)
+	}
+}
+
+func TestRefineCloudSegmentNotOverridden(t *testing.T) {
+	db := openTempDB(t)
+	segs := []geo.Segment{
+		{Start: 0, End: 0x00FFFFFF, Geo: geo.UnknownGeo, Source: "fill"},
+		{Start: 0x01000000, End: 0x0100FFFF, Source: "qqwry",
+			Geo: geo.GeoInfo{Country: "中国", Province: "广东省", City: "广州市", ISP: "腾讯云"}},
+		{Start: 0x01010000, End: 0xFFFFFFFF, Geo: geo.UnknownGeo, Source: "fill"},
+	}
+	if err := db.SaveSegments(segs); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := &fakeProvider{
+		split: 0x01008000,
+		a:     provider.Result{Province: "北京市", City: "北京市"},
+		b:     provider.Result{Province: "吉林省", City: "长春市"},
+	}
+	if _, err := Run(context.Background(), db, fp, segs, Options{
+		Threshold: 4096, MaxDepth: 1, QPS: 1000, Workers: 1, ProgressN: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.LoadSegments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sg := range got {
+		if sg.Geo.Country != "中国" {
+			continue
+		}
+		if sg.Geo.Province != "广东省" || sg.Geo.City != "广州市" {
+			t.Fatalf("云类段不该被百度覆盖: %+v", sg)
+		}
 	}
 }
 

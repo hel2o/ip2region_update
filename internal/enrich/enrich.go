@@ -2,7 +2,10 @@
 //
 // 硬规则（与"提升精度"目标绑定）：
 //   - 百度只到城市级 → 区/镇 永不改，只认 qqwry
-//   - 只覆盖更具体的值：provider 返回空字段时保留原值，绝不清空
+//   - 默认**只补空不覆盖**：实测百度在省市上与 qqwry 是同一量级的噪声源
+//     （40 样本里 1 例改对、1 例改错），覆盖只会引入无谓抖动；
+//     覆盖需要显式 -override，且云/CDN 段永远不覆盖
+//   - provider 返回空字段时保留原值，绝不清空
 //   - ISP 只在原本为空时填充；两边都有值但不同只记冲突，不写库（qqwry 的
 //     "腾讯云/网宿" 往往比百度的 "电信" 更细）
 //   - 同 /24 共用一个查询结果（百度的归属按网段，不按单 IP）
@@ -22,6 +25,7 @@ import (
 
 	"github.com/hel2o/ip2region/internal/geo"
 	"github.com/hel2o/ip2region/internal/provider"
+	"github.com/hel2o/ip2region/internal/regions"
 	"github.com/hel2o/ip2region/internal/store"
 )
 
@@ -36,6 +40,7 @@ type Options struct {
 	ProgressN    int    // 每 N 个 probe 打一行进度
 	ConflictFile string // 冲突样例输出路径（空则不写）
 	MaxConflicts int    // 冲突文件最多写多少行
+	Override     bool   // 是否允许覆盖已有省市（默认 false，只补空）
 }
 
 // Stats 是执行统计。
@@ -232,7 +237,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 			}
 
 			if r.err == nil || provider.IsCacheable(r.err) {
-				ups, kinds, conf := decide(segs, r.pr, r.res)
+				ups, kinds, conf := decide(segs, r.pr, r.res, opt.Override)
 				st.ProvFixed += kinds.prov
 				st.CityFixed += kinds.city
 				st.ISPFilled += kinds.isp
@@ -283,6 +288,14 @@ type confInfo struct {
 	sample string
 }
 
+// TagSource 在来源串上追加标记，已存在则不重复添加。
+func TagSource(src, tag string) string {
+	if strings.Contains(src, tag) {
+		return src
+	}
+	return src + tag
+}
+
 // SameGeo 判断两次查询结果是否指向同一省市（忽略 市/区 后缀差异与空值）。
 // 供 refine 判断"三点是否一致"，两侧都为空也算一致（都无数据）。
 func SameGeo(a, b provider.Result) bool {
@@ -306,7 +319,12 @@ func trimAdminSuffix(s string) string {
 }
 
 // decide 决定某个探测点的结果如何应用到其所有段上。
-func decide(segs []geo.Segment, pr *probe, res provider.Result) ([]store.SegmentUpdate, kindCount, confInfo) {
+//
+// 三种动作，优先级从高到低：
+//  1. 补空：省/市/ISP 为空就填 —— 永远做，云段也做（这是 enrich 的主要价值）
+//  2. 覆盖省市：仅 override=true 且非云段；百度说换省却给不出市 → 低置信度不动
+//  3. ISP 冲突：两边都有值但不同 → 只记录不写库（qqwry 的"腾讯云/网宿"更细）
+func decide(segs []geo.Segment, pr *probe, res provider.Result, override bool) ([]store.SegmentUpdate, kindCount, confInfo) {
 	var (
 		ups  []store.SegmentUpdate
 		k    kindCount
@@ -318,30 +336,46 @@ func decide(segs []geo.Segment, pr *probe, res provider.Result) ([]store.Segment
 
 	for _, idx := range pr.segIdx {
 		sg := segs[idx]
-		up := store.SegmentUpdate{Start: sg.Start, Source: sg.Source + "+baidu"}
+		up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+baidu")}
 
-		provDiff := res.Province != "" && !sameName(sg.Geo.Province, res.Province)
-		cityDiff := res.City != "" && !sameName(sg.Geo.City, res.City)
+		provEmpty := sg.Geo.Province == ""
+		cityEmpty := sg.Geo.City == ""
 
-		if provDiff {
-			p := res.Province
-			up.Province = &p
+		// 1. 补空
+		if provEmpty && res.Province != "" {
+			v := res.Province
+			up.Province = &v
 			k.prov++
-			// 省变了市必须跟着变，否则会留下跨省组合；百度没给市就清空
-			c := res.City
-			up.City = &c
-			if sg.Geo.City != "" {
-				k.city++
-			}
-		} else if cityDiff {
-			c := res.City
-			up.City = &c
+		}
+		if cityEmpty && res.City != "" {
+			v := res.City
+			up.City = &v
 			k.city++
 		}
 
+		// 2. 覆盖（云/CDN 段禁止覆盖：地理位置由路由决定，探到的是 PoP 城市）
+		if override && !regions.IsCloudISP(sg.Geo.ISP) {
+			switch {
+			case !provEmpty && res.Province != "" && !sameName(sg.Geo.Province, res.Province):
+				if sg.Geo.City != "" && res.City == "" {
+					break // 低置信度：说换省却给不出市，整条不动
+				}
+				pv, cv := res.Province, res.City
+				up.Province = &pv
+				up.City = &cv // 省变了市必须同步，否则留下跨省组合
+				k.prov++
+				k.city++
+			case !cityEmpty && res.City != "" && !sameName(sg.Geo.City, res.City):
+				v := res.City
+				up.City = &v
+				k.city++
+			}
+		}
+
+		// 3. ISP：只补空，冲突只记录
 		if sg.Geo.ISP == "" && res.ISP != "" {
-			i := res.ISP
-			up.ISP = &i
+			v := res.ISP
+			up.ISP = &v
 			k.isp++
 		} else if sg.Geo.ISP != "" && res.ISP != "" && sg.Geo.ISP != res.ISP {
 			conf.n++
@@ -358,6 +392,7 @@ func decide(segs []geo.Segment, pr *probe, res provider.Result) ([]store.Segment
 	}
 	return ups, k, conf
 }
+
 
 // writeConflicts 输出冲突样例（TSV，便于人工抽检）。
 func writeConflicts(path string, lines []string) error {

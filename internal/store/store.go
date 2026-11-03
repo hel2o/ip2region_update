@@ -143,3 +143,36 @@ func (s *DB) GetMeta(key string) (string, error) {
 	}
 	return v, err
 }
+
+// QueryRows 执行只读查询，返回所有行的值（按列顺序）。
+// 用于报表类的一次性聚合查询，避免为每个报表都写一套 Scan。
+func (s *DB) QueryRows(query string, args ...any) ([][]any, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	var out [][]any
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok {
+				vals[i] = string(b)
+			}
+		}
+		out = append(out, vals)
+	}
+	return out, rows.Err()
+}

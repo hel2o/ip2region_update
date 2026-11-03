@@ -26,6 +26,7 @@ func runEnrich(args []string) error {
 	timeout := fs.Duration("timeout", 10*time.Second, "单请求超时")
 	progressN := fs.Int("progress", 2000, "每 N 条打进度")
 	conflictFile := fs.String("conflicts", "build/enrich-conflicts.tsv", "冲突样例输出（空则不写）")
+	override := fs.Bool("override", false, "允许用百度覆盖已有省市（默认只补空）")
 	_ = fs.Parse(args)
 
 	m, err := parseMask(*mask)
@@ -64,6 +65,7 @@ func runEnrich(args []string) error {
 		Timeout:      *timeout,
 		ProgressN:    *progressN,
 		ConflictFile: *conflictFile,
+		Override:     *override,
 	})
 
 	fmt.Println("---- enrich 统计 ----")

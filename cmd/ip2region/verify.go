@@ -112,6 +112,7 @@ func compareGolden(segs []geo.Segment, goldenPath string, n int) error {
 	fmt.Printf("\n---- golden 对拍（%d 个随机 IP）----\n", n)
 	var (
 		matchCountry, matchProv, bothCN int
+		provFilled, provConflict        int // 旧空→新有值 / 两边都有值但不同
 		mismatches, provDiffs           []string
 	)
 	for i := 0; i < n; i++ {
@@ -138,10 +139,20 @@ func compareGolden(segs []geo.Segment, goldenPath string, n int) error {
 		}
 		if mCountry == "中国" && gCountry == "中国" {
 			bothCN++
-		}
-		if mCountry == "中国" && gCountry == "中国" && !pOK && len(provDiffs) < 15 {
-			provDiffs = append(provDiffs, fmt.Sprintf(
-				"%-15s 新省: %-14q 旧省: %-14q 旧串: %s", geo.Uint2IP(ip), mProv, gProv, gRegion))
+			switch {
+			case pOK:
+			case gProv == "" && mProv != "":
+				provFilled++ // 旧库空、我们补上了 —— 这是改进，不是分歧
+			case gProv != "" && mProv == "":
+				provDiffs = append(provDiffs, fmt.Sprintf(
+					"%-15s 新省: <空>  旧省: %-12q 旧串: %s", geo.Uint2IP(ip), gProv, gRegion))
+			default:
+				provConflict++
+				if len(provDiffs) < 15 {
+					provDiffs = append(provDiffs, fmt.Sprintf(
+						"%-15s 新省: %-12q 旧省: %-12q 旧串: %s", geo.Uint2IP(ip), mProv, gProv, gRegion))
+				}
+			}
 		}
 		if !cOK && len(mismatches) < 10 {
 			mismatches = append(mismatches, fmt.Sprintf(
@@ -151,6 +162,8 @@ func compareGolden(segs []geo.Segment, goldenPath string, n int) error {
 
 	fmt.Printf("国家一致率          : %.2f%%\n", pct2(matchCountry, n))
 	fmt.Printf("省级一致率          : %.2f%%（按双方均判为中国的 %d 个 IP）\n", pct2(matchProv, bothCN), bothCN)
+	fmt.Printf("  其中 旧库为空/新库补上: %d（%.2f%%，属改进）\n", provFilled, pct2(provFilled, bothCN))
+	fmt.Printf("  其中 双方都有值但不同  : %d（%.2f%%，需人工抽查）\n", provConflict, pct2(provConflict, bothCN))
 	if len(provDiffs) > 0 {
 		fmt.Println("省级样例（前 15）:")
 		for _, m := range provDiffs {

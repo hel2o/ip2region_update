@@ -21,6 +21,7 @@ const usage = `ip2region 构建工具
   merge     叠加自定义 CIDR 覆盖，输出最终 txt
   build     调 xdb maker 生成 .xdb
   verify    校验段表连续性/全覆盖，并与参考 xdb 抽样对拍
+  stats     输出字段覆盖率报表（IP 加权）
   look      查询单个 IP（调试用）
 
 每个命令都支持 -h 查看专属参数。
@@ -51,6 +52,8 @@ func main() {
 		err = runBuild(args)
 	case "verify":
 		err = runVerify(args)
+	case "stats":
+		err = runStats(args)
 	case "look":
 		err = runLook(args)
 	case "-h", "--help", "help":

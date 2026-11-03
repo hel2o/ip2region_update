@@ -26,6 +26,7 @@ import (
 	"github.com/hel2o/ip2region/internal/enrich"
 	"github.com/hel2o/ip2region/internal/geo"
 	"github.com/hel2o/ip2region/internal/provider"
+	"github.com/hel2o/ip2region/internal/regions"
 	"github.com/hel2o/ip2region/internal/store"
 )
 
@@ -307,10 +308,10 @@ func (r *refiner) resolve(ctx context.Context, sg geo.Segment, depth int) ([]geo
 			// 顶层（原段仍在库里）才写库；细分片由 ReplaceSegment 一并写入
 			_ = r.db.UpdateSegments([]store.SegmentUpdate{{
 				Start: sg.Start, Province: ptr(geoOut.Province), City: ptr(geoOut.City),
-				ISP: ispPtr(geoOut.ISP, sg.Geo.ISP), Source: sg.Source + "+baidu",
+				ISP: ispPtr(geoOut.ISP, sg.Geo.ISP), Source: enrich.TagSource(sg.Source, "+baidu"),
 			}})
 		}
-		return []geo.Segment{{Start: sg.Start, End: sg.End, Geo: geoOut, Source: sg.Source + "+baidu"}}, nil
+		return []geo.Segment{{Start: sg.Start, End: sg.End, Geo: geoOut, Source: enrich.TagSource(sg.Source, "+baidu")}}, nil
 	}
 
 	left, err := r.resolve(ctx, geo.Segment{Start: lo, End: mid - 1, Geo: sg.Geo, Source: sg.Source}, depth+1)
@@ -324,19 +325,37 @@ func (r *refiner) resolve(ctx context.Context, sg geo.Segment, depth int) ([]geo
 	return append(left, right...), nil
 }
 
-// applyTo 把探测结果合并进原有归属：只覆盖更具体的信息，不清空原有值。
+// applyTo 把探测结果合并进原有归属。
+//
+// 与 enrich 同一套口径：
+//   - 云/CDN/IDC 段只补空，不覆盖（地理位置由路由决定，探到的是 PoP 城市）
+//   - 百度说换省却给不出市、而原值本来有市 → 置信度不足，不动省市
+//   - ISP 只补空；区镇永不改动
 func applyTo(res provider.Result, old geo.GeoInfo) geo.GeoInfo {
 	out := old
-	if res.Province != "" {
-		out.Province = res.Province
-	}
-	if res.City != "" {
-		out.City = res.City
+	virtual := regions.IsCloudISP(old.ISP)
+
+	switch {
+	case virtual:
+		if out.Province == "" {
+			out.Province = res.Province
+		}
+		if out.City == "" {
+			out.City = res.City
+		}
+	case res.Province != "" && out.City != "" && res.City == "":
+		// 低置信度，省市都不动
+	default:
+		if res.Province != "" {
+			out.Province = res.Province
+		}
+		if res.City != "" {
+			out.City = res.City
+		}
 	}
 	if out.ISP == "" && res.ISP != "" {
 		out.ISP = res.ISP
 	}
-	// 区镇永不改动
 	return out
 }
 
