@@ -30,6 +30,7 @@ $ ip2region look --xdb build/ip2region.xdb 183.3.149.185
   - [verify：校验与对拍](#verify校验与对拍)
   - [stats：质量报表](#stats质量报表)
   - [look：查询调试](#look查询调试)
+- [发布更新](#发布更新同步到-xdb-仓库)
 - [自定义覆盖规则](#自定义覆盖规则)
 - [缓存与断点续跑](#缓存与断点续跑)
 - [数据质量与已知限制](#数据质量与已知限制)
@@ -323,6 +324,45 @@ go run ./cmd/ip2region look 183.3.149.185
 183.3.149.185    中国 | 广东省 | 广州市 | 番禺区 | 钟村 | 中国电信
 8.8.8.8          美国 | 加利福尼亚州 | 圣克拉拉 | 山景城 |  | 谷歌公司DNS服务器
 ```
+
+---
+
+## 发布更新（同步到 xdb 仓库）
+
+xdb 产物放在独立仓库 `ip2region_update`（`ip2region_update/` 目录，独立的 git 仓库，
+已在本仓库 `.gitignore` 里排除），源码仓库不存 22MB 的二进制。
+
+### 一次完整更新
+
+```bash
+# ① 在源码仓库生成
+go run ./cmd/ip2region fetch            # 打印数据版本号，例如 20261028
+go run ./cmd/ip2region parse
+go run ./cmd/ip2region enrich -qps 60
+go run ./cmd/ip2region refine -qps 60
+go run ./cmd/ip2region merge
+go run ./cmd/ip2region build -from txt
+go run ./cmd/ip2region verify -n 50000  # 必须通过（覆盖 IP = 4294967296）
+go run ./cmd/ip2region stats            # 记下覆盖率，要写进发布 README
+
+# ② 拷进发布仓库
+cd ip2region_update
+rm -f ip2region_*.xdb                                # 只保留最新一份
+cp ../build/ip2region.xdb ./ip2region_<数据版本>.xdb   # 用 fetch 打印的版本号，不是当天日期
+# 更新 README.md 里的版本号 / 文件大小 / 覆盖率
+git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin master
+```
+
+### 两条硬要求
+
+1. **文件名用 qqwry 数据版本，不是打包日期**。`fetch` 输出的 `远端最新版本: 20261028`
+   就是版本号。下游靠文件名判断新旧。
+2. **`verify` 不通过不许发**。`覆盖 IP 总数` 必须等于 `4294967296`（2^32），
+   说明全覆盖无缝隙；不等于就是库坏了。
+
+### 下游怎么升级
+
+替换 xdb 文件后重启进程即可。用 `NewWithBuffer` 把文件读进内存的方式，必须重启才会重新加载。
 
 ---
 

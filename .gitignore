@@ -6,3 +6,4 @@ data/*.db-*
 /ip2region
 /ip2region.exe
 testdata/golden/
+ip2region_update/
