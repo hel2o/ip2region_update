@@ -158,7 +158,7 @@ rebuild.bat -only-custom        :: 或 ./rebuild.sh -only-custom
 > （字节级比对只差这 1 个字节），不要用 md5 判断数据是否变化。
 
 
-出库后要推到各项目用，接着跑 `./sync.sh`（见[发布更新](#推到-9926-上的四个项目)）。
+出库后要推到各项目用，接着跑 `./sync.sh`（见[同步到 3 台机器的 6 个目录并重载](#同步到-3-台机器的-6-个目录并重载)）。
 
 ---
 
@@ -744,37 +744,55 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 
 替换 xdb 文件后重启进程即可。用 `NewWithBuffer` 把文件读进内存的方式，必须重启才会重新加载。
 
-### 推到 99.26 上的四个项目
+### 同步到 3 台机器的 6 个目录并重载
 
-`sync.sh`（Windows 用 `sync.bat`）把 `build/ip2region.xdb` 同步到内网构建机
-`192.168.99.26` 的四份副本：
+`sync.sh`（Windows 用 `sync.bat`）把 `build/ip2region.xdb` 推到 3 台机器，文件全部到位
+后再调各服务的重载接口，让进程立刻用上新库：
 
-| 目标 |
-|---|
-| `/home/work/management-system/xdb/ip2region.xdb` |
-| `/home/work/workspace/src/github.com/hel2o/management-system/xdb/ip2region.xdb` |
-| `/home/work/workspace/src/github.com/hel2o/sniffer/ip2region.xdb` |
-| `/home/work/workspace/src/github.com/hel2o/english_school/ip2region.xdb` |
+| 机器 | 目标路径 | 部署形态 |
+|---|---|---|
+| `192.168.99.26` | `/home/work/management-system/xdb/ip2region.xdb` | 管理平台运行目录 |
+| `192.168.99.26` | `/home/work/workspace/src/github.com/hel2o/management-system/xdb/ip2region.xdb` | 管理平台源码目录 |
+| `192.168.99.26` | `/home/work/workspace/src/github.com/hel2o/sniffer/ip2region.xdb` | sniffer 源码目录 |
+| `192.168.99.26` | `/home/work/workspace/src/github.com/hel2o/english_school/ip2region.xdb` | english_school 源码目录 |
+| `172.25.0.19` | `/home/sniffer/ip2region.xdb` | sniffer 运行目录 |
+| `172.19.99.1` | `/home/english_school/ip2region.xdb` | english_school 运行目录 |
+
+重载接口（文件全部同步成功后才调；任一目标同步失败就整轮不重载，避免新旧混读）：
+
+| 服务 | 接口 | 认证 |
+|---|---|---|
+| sniffer | `http://172.25.0.19:8080/reloadIp2Region` | 无 |
+| english_school | `https://cs.clifford.cn/reloadxdb` | 无 |
+| management-system | `https://network.clifford.cn/api/admin/reloadIp2Region` | 需登录 Cookie |
 
 ```bash
-./sync.sh              # 全部同步
+./sync.sh              # 同步 + 重载
 ./sync.sh -n           # dry-run：只比 md5，报「已是同一版本 / 将更新 / 目标不存在」
 ./sync.sh -src build/test.xdb   # 换源文件
 ./sync.sh -keep 5      # 每个目标保留 5 份历史备份（默认 3）
+./sync.sh -skip-reload          # 只传文件
+./sync.sh -strict-reload        # 重载失败也算失败（默认只告警）
+./sync.sh -ms-cookie 'token=..;account=..'   # 管理平台重载用，也可用 IPREGION_MS_COOKIE
 ```
+
+> management-system 的 `reloadIp2Region` 挂在 `AuthMiddleware` 后面，必须带登录 Cookie。
+> 没配 Cookie 时脚本会打印 `[跳过]` 并继续，其他两个接口照常调；Cookie 过期会返回
+> `code 4001`，脚本会报 `[失败]`。Cookie 会随登录态失效，不建议写进脚本，用环境变量传。
 
 实现要点（都是为了避免线上读到半截文件）：
 
-- **只上传一次**：先 `scp` 到远端 `/tmp/ip2region.<md5>.xdb`，再在远端 `cp` 到四个目标。
-  同 md5 的临时文件已存在时连上传都跳过（重复跑几乎瞬时）。
-- **跳过同版本**：目标 md5 已经等于源 md5 就直接报「最新」，不产生备份垃圾。
+- **整台跳过**：先并行问一遍各目标 md5，全等于源 md5 就整台跳过，连上传都不做。
+- **只上传一次**：需要更新时先 `scp` 到该机 `/tmp/ip2region.<md5>.xdb`，再在远端 `cp`
+  到本机所有目标，47MB 只走一遍网络（同 md5 的临时文件已存在时连上传都跳过）。
 - **原子替换**：写同目录的 `ip2region.xdb.tmp.<pid>`，`chown`/`chmod` 对齐旧文件后 `mv -f`，
   不会出现读到写一半的情况。
 - **自动备份**：覆盖前 `cp -p` 成 `ip2region.xdb.bak.<时间戳>`，每个目标只留最近 `-keep` 份。
 - **回读校验**：每个目标传完重新 `md5sum` 比对，不一致退出码非 0。
 - **防呆**：源文件小于 5MB 直接拒绝推（半截文件/空占位别砸线上）。
 
-脚本只动文件，**不重启任何服务**；跑着的进程不支持热加载的话要自己 restart。
+`172.25.0.19` 需要 `es_deploy` 免密（`~/.ssh/config` 里已配好 `Host 172.25.0.19`），
+没配好时脚本会打 `!! ssh ... 不通` 并继续处理其它机器。
 
 ---
 
@@ -1044,8 +1062,8 @@ _legacy/                旧实现归档，不参与编译（不进 git）
 
 rebuild.bat             Windows 一键重建（双击可用）
 rebuild.sh              Linux/macOS 一键重建
-sync.bat                Windows 一键同步到 99.26（双击可用）
-sync.sh                 同步 xdb 到 99.26 上的四个项目目录
+sync.bat                Windows 一键同步 + 重载（双击可用）
+sync.sh                 同步 xdb 到 3 台机器 6 个目录并调重载接口
 ```
 
 ---
