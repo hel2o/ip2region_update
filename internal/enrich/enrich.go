@@ -284,9 +284,9 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 			}
 
 			if r.err == nil || provider.IsCacheable(r.err) {
-				// 百度只返回"中国 移动"这类（没有省市）——记下来，
-				// GeoCN 阶段据此决定要不要用自己的省市覆盖 qqwry
-				noGeo := r.res.Province == "" && r.res.City == ""
+				// 百度没给到市级（只回"中国 移动"或只给到省）——记下来，
+				// GeoCN 阶段据此决定要不要按"层级更深者优先"覆盖 qqwry
+				noGeo := r.res.City == ""
 				for _, part := range r.pr.parts {
 					sg := &segs[part.idx]
 					ng, kinds, ispConf := decidePart(sg.Geo, r.res, opt.Override)
@@ -311,7 +311,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 						src = TagSource(src, "+baidu")
 					}
 					if noGeo {
-						src = TagSource(src, baiduNoGeo)
+						src = TagSource(src, baiduNoCity)
 					}
 					a := aggs[part.idx]
 					if a == nil {
@@ -367,7 +367,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		log.Printf("  片级放弃: 省市不一致 %d，跨度超限 %d，只有市级编码 %d，云段整段跳过 %d",
 			g.conflict, g.tooWide, g.noDistrict, g.cloud)
 		if g.overridden > 0 {
-			log.Printf("  百度无省市、改用 GeoCN 判断: %d 片", g.overridden)
+			log.Printf("  百度无市级、GeoCN 层级更深而改用 GeoCN: %d 片", g.overridden)
 		}
 	}
 
@@ -400,10 +400,11 @@ type geocnResult struct {
 	overridden                                  int // 百度没给省市，改用 GeoCN 的
 }
 
-// baiduNoGeo 是"百度没给出省市"的来源标记。
-// 打了这个标记的段，说明百度只回了"中国 移动"这类，qqwry 的省市是唯一来源、
-// 没有独立证据，此时允许 GeoCN 覆盖。
-const baiduNoGeo = "+baidu-none"
+// baiduNoCity 是"百度没给出市级"的来源标记。
+//
+// 触发条件：百度返回的 city 为空（只回了"中国 移动"或只给到省）。
+// 打了这个标记的段，省市只能靠 qqwry，此时允许 GeoCN 按"谁的层级更深"竞争。
+const baiduNoCity = "+baidu-nocity"
 
 // maxDistrictSpan 是可信区县的最大跨度。
 //
@@ -443,7 +444,7 @@ func applyGeoCN(db *store.DB, segs []geo.Segment, gc *geocn.DB, dryRun bool) geo
 		// 百度对这段完全没给省市（只返回"中国 移动"这类）时，qqwry 的值没有任何
 		// 独立证据支撑，而 GeoCN 有明确判断——此时允许 GeoCN 覆盖省市。
 		// 否则会出现 111.55.211.0/19（11520 个 IP，实为广东/重庆）整段标"山西省"。
-		allowOverride := strings.Contains(sg.Source, baiduNoGeo)
+		allowOverride := strings.Contains(sg.Source, baiduNoCity)
 		runs := buildRuns(sg, slices, &res, allowOverride)
 		if len(runs) == 0 {
 			continue
@@ -576,12 +577,25 @@ func buildRuns(sg *geo.Segment, slices []geocn.Slice, res *geocnResult, allowOve
 
 		switch {
 		case allowOverride:
-			// 百度没给省市：采信 GeoCN 的省市（区县能填就一起填）
-			r.prov, r.city = info.Province, info.City
-			if hasDist && !tooWide {
+			// 百度没给到市级：GeoCN 与 qqwry 比"谁的层级更深"，深的胜出。
+			//
+			//   省+市 > 只有省 > 空
+			//
+			// 层级相同时保留 qqwry —— 两个源都有市但说法不同时，没有证据判断
+			// 谁更准，动它只会引入随机抖动。
+			if geoLevel(info.Province, info.City) > geoLevel(cur.Province, cur.City) {
+				r.prov, r.city = info.Province, info.City
+				if hasDist && !tooWide {
+					r.county = info.District
+				}
+				res.overridden++
+			} else if !geoConsistent(cur, info) {
+				// 同层级但省市对不上：记冲突，保留原值
+				res.conflict++
+			} else if hasDist && !tooWide {
+				// 层级不低但省市自洽：区县照样补
 				r.county = info.District
 			}
-			res.overridden++
 		case !hasDist:
 			res.noDistrict++
 		case tooWide:
@@ -598,6 +612,17 @@ func buildRuns(sg *geo.Segment, slices []geocn.Slice, res *geocnResult, allowOve
 		push(run{start: runs[n-1].end + 1, end: sg.End})
 	}
 	return runs
+}
+
+// geoLevel 返回省市信息的层级深度：2=省+市，1=只有省，0=空。
+func geoLevel(prov, city string) int {
+	if city != "" {
+		return 2
+	}
+	if prov != "" {
+		return 1
+	}
+	return 0
 }
 
 // geoConsistent 判断 GeoCN 的省市与我们已有的值是否对得上（空值不参与比较）。
