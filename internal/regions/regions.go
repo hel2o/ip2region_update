@@ -113,6 +113,8 @@ func Split(s string) Parts {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "\u3000", "")
 	s = strings.ReplaceAll(s, " ", "")
+	// 纯真免费版会给境外记录塞 "CZ88.NET" 水印，先摘掉再拆，否则会被当成地名
+	s = StripWatermark(s)
 	if s == "" {
 		return Parts{}
 	}

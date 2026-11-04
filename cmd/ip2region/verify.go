@@ -52,6 +52,11 @@ func runVerify(args []string) error {
 	}
 	fmt.Printf("归属块数            : %d\n", blocks)
 
+	// 纯真免费版的水印不该出现在成品里，出现了说明有路径绕过清洗
+	if n := countWatermarks(segs); n > 0 {
+		fmt.Printf("!! CZ88 水印残留    : %d 段（merge 时会自动清除，建议重跑 merge+build）\n", n)
+	}
+
 	if *sample {
 		testIPs := []string{
 			"0.0.0.1", "1.0.1.0", "8.8.8.8", "114.114.114.114",

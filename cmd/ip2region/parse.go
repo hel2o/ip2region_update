@@ -32,18 +32,20 @@ func recordToSegment(r qqwry.Record) geo.Segment {
 			County:   p.County,
 			Town:     p.Town,
 		}
-		if isp, ok := regions.NormalizeISP(r.Area); ok {
+		// 地区串同样可能只是 "CZ88.NET" 水印，先清洗再判断是不是运营商
+		area := regions.StripWatermark(r.Area)
+		if isp, ok := regions.NormalizeISP(area); ok {
 			g.ISP = isp
-		} else if r.Area != "" {
+		} else if area != "" {
 			// 地区串不是运营商：中国 IP 视为乡镇级补充，境外视为组织名
 			if p.Country == "中国" {
 				if g.Town == "" {
-					g.Town = r.Area
+					g.Town = area
 				} else {
-					g.Town = g.Town + "/" + r.Area
+					g.Town = g.Town + "/" + area
 				}
 			} else {
-				g.ISP = r.Area
+				g.ISP = area
 			}
 		}
 	}

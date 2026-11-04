@@ -41,6 +41,9 @@ func runBuild(args []string) error {
 			return fmt.Errorf("段表为空，请先执行 parse")
 		}
 		log.Printf("载入段表: %d 段", len(segs))
+		if n := sanitizeSegments(segs); n > 0 {
+			log.Printf("清除 CZ88 水印: %d 段", n)
+		}
 
 		if err := os.MkdirAll(filepath.Dir(*src), 0o755); err != nil {
 			return err

@@ -76,6 +76,9 @@ func runLegacy(args []string) error {
 		for _, sl := range slices {
 			g := sg.Geo
 			old := sl.Geo()
+			// 旧库是早年的纯真转出来的，境外字段里夹着 "CZ88.NET" 水印，
+			// 不清掉就会被当成省市搬进新库
+			cleanGeo(&old)
 			before := g
 			fillEmpty(&g, old)
 			if g != before {
