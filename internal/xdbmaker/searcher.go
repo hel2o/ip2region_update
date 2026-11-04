@@ -125,6 +125,18 @@ func (s *Searcher) SearchByStr(str string) (string, error) {
 
 // Search find the region for the specified long ip
 func (s *Searcher) Search(ip uint32) (string, error) {
+	region, _, _, err := s.search(ip)
+	return region, err
+}
+
+// SearchWithRange 查询归属，同时返回该 IP 所在段的起止地址。
+// 调试/验证界面用：能看出这条归属覆盖了多少个 IP，判断精度是否合理。
+func (s *Searcher) SearchWithRange(ip uint32) (region string, start, end uint32, err error) {
+	return s.search(ip)
+}
+
+// search 是 Search 与 SearchWithRange 的共同实现。
+func (s *Searcher) search(ip uint32) (string, uint32, uint32, error) {
 	// reset the global ioCount
 	s.ioCount = 0
 
@@ -144,7 +156,7 @@ func (s *Searcher) Search(ip uint32) (string, error) {
 		var buff = make([]byte, VectorIndexSize)
 		err := s.read(int64(HeaderInfoLength+idx), buff)
 		if err != nil {
-			return "", fmt.Errorf("read vector index block at %d: %w", HeaderInfoLength+idx, err)
+			return "", 0, 0, fmt.Errorf("read vector index block at %d: %w", HeaderInfoLength+idx, err)
 		}
 
 		sPtr = binary.LittleEndian.Uint32(buff)
@@ -155,6 +167,7 @@ func (s *Searcher) Search(ip uint32) (string, error) {
 
 	// binary search the segment index to get the region
 	var dataLen, dataPtr = 0, uint32(0)
+	var segStart, segEnd uint32
 	var buff = make([]byte, SegmentIndexBlockSize)
 	var l, h = 0, int((ePtr - sPtr) / SegmentIndexBlockSize)
 	for l <= h {
@@ -162,7 +175,7 @@ func (s *Searcher) Search(ip uint32) (string, error) {
 		p := sPtr + uint32(m*SegmentIndexBlockSize)
 		err := s.read(int64(p), buff)
 		if err != nil {
-			return "", fmt.Errorf("read segment index at %d: %w", p, err)
+			return "", 0, 0, fmt.Errorf("read segment index at %d: %w", p, err)
 		}
 
 		// decode the data step by step to reduce the unnecessary operations
@@ -176,6 +189,7 @@ func (s *Searcher) Search(ip uint32) (string, error) {
 			} else {
 				dataLen = int(binary.LittleEndian.Uint16(buff[8:]))
 				dataPtr = binary.LittleEndian.Uint32(buff[10:])
+				segStart, segEnd = sip, eip
 				break
 			}
 		}
@@ -183,17 +197,17 @@ func (s *Searcher) Search(ip uint32) (string, error) {
 
 	//fmt.Printf("dataLen: %d, dataPtr: %d", dataLen, dataPtr)
 	if dataLen == 0 {
-		return "", nil
+		return "", 0, 0, nil
 	}
 
 	// load and return the region data
 	var regionBuff = make([]byte, dataLen)
 	err := s.read(int64(dataPtr), regionBuff)
 	if err != nil {
-		return "", fmt.Errorf("read region at %d: %w", dataPtr, err)
+		return "", 0, 0, fmt.Errorf("read region at %d: %w", dataPtr, err)
 	}
 
-	return string(regionBuff), nil
+	return string(regionBuff), segStart, segEnd, nil
 }
 
 // do the data read operation based on the setting.

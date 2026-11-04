@@ -23,6 +23,7 @@ const usage = `ip2region 构建工具
   verify    校验段表连续性/全覆盖，并与参考 xdb 抽样对拍
   stats     输出字段覆盖率报表（IP 加权）
   look      查询单个 IP（调试用）
+  serve     启动本地查询页面（人工核验数据用）
 
 每个命令都支持 -h 查看专属参数。
 `
@@ -54,6 +55,8 @@ func main() {
 		err = runVerify(args)
 	case "stats":
 		err = runStats(args)
+	case "serve":
+		err = runServe(args)
 	case "look":
 		err = runLook(args)
 	case "-h", "--help", "help":

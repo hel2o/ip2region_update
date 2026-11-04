@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IP 归属查询 · 核验</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --line2:#eef0f3;
+    --text:#111827; --muted:#6b7280; --muted2:#9ca3af;
+    --primary:#2563eb; --primary-soft:#eff4ff;
+    --ok:#059669; --warn:#d97706; --err:#dc2626;
+    --radius:8px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1440px;margin:0 auto;padding:20px 20px 60px}
+  header{display:flex;align-items:baseline;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+  h1{font-size:17px;font-weight:600;margin:0;letter-spacing:.2px}
+  .meta{font-size:12px;color:var(--muted)}
+  .meta b{color:var(--text);font-weight:600}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 1px 3px rgba(16,24,40,.06)}
+  .card+.card{margin-top:14px}
+  .card-hd{padding:12px 14px;border-bottom:1px solid var(--line2);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .card-hd h2{font-size:13px;font-weight:600;margin:0;color:var(--text)}
+  .card-bd{padding:14px}
+
+  /* 单 IP 输入框 */
+  .searchrow{display:flex;gap:10px;align-items:flex-start}
+  .searchbox{position:relative;flex:1;max-width:520px}
+  .searchbox .ico{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--muted2);pointer-events:none}
+  .searchbox input{
+    width:100%;height:36px;padding:0 64px 0 32px;
+    border:1px solid var(--line);border-radius:6px;background:#fff;
+    font:13px/1 inherit;color:var(--text);outline:none;transition:border-color .12s, box-shadow .12s;
+  }
+  .searchbox input::placeholder{color:var(--muted2)}
+  .searchbox input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+  .searchbox .acts{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;gap:2px}
+  .iconbtn{
+    width:24px;height:24px;display:grid;place-items:center;border:0;background:transparent;
+    border-radius:4px;color:var(--muted2);cursor:pointer;padding:0
+  }
+  .iconbtn:hover{background:#f3f4f6;color:var(--text)}
+  .iconbtn svg{width:13px;height:13px}
+
+  /* 历史下拉 */
+  .hist{
+    position:absolute;left:0;right:0;top:40px;z-index:30;background:#fff;
+    border:1px solid var(--line);border-radius:6px;box-shadow:0 8px 24px rgba(16,24,40,.12);
+    max-height:250px;overflow:auto;display:none;padding:4px
+  }
+  .hist.on{display:block}
+  .hist .hd{font-size:11px;color:var(--muted2);padding:5px 8px 3px}
+  .hist .it{
+    display:flex;align-items:center;justify-content:space-between;
+    height:28px;padding:0 8px;border-radius:4px;cursor:pointer;font-size:13px
+  }
+  .hist .it .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hist .it .x{color:var(--muted2);font-size:11px;padding:0 4px;border-radius:3px}
+  .hist .it:hover,.hist .it.sel{background:var(--primary-soft)}
+  .hist .it.sel .t{color:var(--primary);font-weight:500}
+  .hist .it:hover .x{background:#e5e7eb;color:var(--text)}
+  .hist .empty{padding:14px 8px;color:var(--muted2);font-size:12px;text-align:center}
+
+  /* 按钮 */
+  button.btn{
+    height:36px;padding:0 16px;border:1px solid var(--line);border-radius:6px;
+    background:#fff;color:var(--text);font:13px/1 inherit;cursor:pointer;
+    transition:background .12s,border-color .12s,color .12s;white-space:nowrap
+  }
+  button.btn:hover{background:#f9fafb;border-color:#d1d5db}
+  button.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  button.btn.primary:hover{background:#1d4ed8;border-color:#1d4ed8}
+  button.btn:disabled{opacity:.55;cursor:not-allowed}
+  button.btn.sm{height:28px;padding:0 10px;font-size:12px}
+
+  textarea{
+    width:100%;min-height:112px;padding:10px 12px;resize:vertical;
+    border:1px solid var(--line);border-radius:6px;background:#fff;
+    font:12.5px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--text);outline:none;transition:border-color .12s,box-shadow .12s
+  }
+  textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+  textarea::placeholder{color:var(--muted2)}
+
+  .row2{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  .hint{font-size:12px;color:var(--muted2)}
+  kbd{font:11px/1 ui-monospace,monospace;background:#f3f4f6;border:1px solid var(--line);border-bottom-width:2px;border-radius:3px;padding:2px 5px;color:var(--muted)}
+
+  /* 汇总 */
+  .stats{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+  .stats .kv{display:flex;align-items:baseline;gap:5px}
+  .stats .kv b{font-size:15px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+  .stats .kv .pct{color:var(--muted2);font-size:11.5px}
+
+  /* 表格 */
+  .tblwrap{overflow:auto;max-height:64vh;border-radius:0 0 var(--radius) var(--radius)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  thead th{
+    position:sticky;top:0;z-index:2;background:#fafbfc;
+    text-align:left;font-weight:600;color:var(--muted);
+    padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;font-size:12px
+  }
+  tbody td{padding:6px 10px;border-bottom:1px solid var(--line2);vertical-align:middle;white-space:nowrap}
+  tbody tr:hover{background:#fafbff}
+  tbody tr:last-child td{border-bottom:0}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .ip{font-weight:500}
+  .dim{color:var(--muted2)}
+  .empty-cell{color:#d1d5db}
+  .tag{
+    display:inline-block;padding:1px 7px;border-radius:4px;background:#f3f4f6;
+    color:#374151;font-size:11.5px;line-height:18px
+  }
+  .tag.blue{background:var(--primary-soft);color:#1d4ed8}
+  .tag.green{background:#ecfdf5;color:#047857}
+  .err{color:var(--err);font-size:12px}
+  .size{font-variant-numeric:tabular-nums;color:var(--muted)}
+  .size.big{color:var(--warn);font-weight:500}
+
+  .empty{padding:44px 20px;text-align:center;color:var(--muted2);font-size:13px}
+  .empty svg{width:34px;height:34px;opacity:.35;margin-bottom:8px;display:block;margin-inline:auto}
+
+  .toast{
+    position:fixed;left:50%;bottom:28px;transform:translate(-50%,10px);
+    background:#111827;color:#fff;font-size:12.5px;padding:8px 14px;border-radius:6px;
+    opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:99
+  }
+  .toast.on{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>IP 归属查询</h1>
+    <span class="meta" id="meta">加载中…</span>
+  </header>
+
+  <!-- 查询 -->
+  <div class="card">
+    <div class="card-bd">
+      <div class="searchrow">
+        <div class="searchbox">
+          <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4" stroke-linecap="round"/>
+          </svg>
+          <input id="q" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="输入 IP / CIDR / 起止 IP，回车查询">
+          <div class="acts">
+            <button class="iconbtn" id="clearQ" title="清空 (Esc)">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M5 5l10 10M15 5L5 15" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button class="iconbtn" id="histBtn" title="历史记录">
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7">
+                <circle cx="10" cy="10" r="7"/><path d="M10 6v4.2l2.6 1.6" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+          <div class="hist" id="hist"></div>
+        </div>
+        <button class="btn primary" id="go">查询</button>
+      </div>
+
+      <div class="row2" style="margin-top:14px">
+        <span class="hint">批量：每行一个，或用逗号 / 空格分隔 · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 查询</span>
+      </div>
+      <textarea id="bulk" spellcheck="false" placeholder="183.3.149.185&#10;223.5.5.5&#10;1.12.0.1"></textarea>
+      <div class="row2">
+        <button class="btn primary" id="goBulk">批量查询</button>
+        <button class="btn" id="sample">填入示例</button>
+        <button class="btn" id="clearAll">清空结果</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 结果 -->
+  <div class="card">
+    <div class="card-hd">
+      <h2>查询结果</h2>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div class="tblwrap" id="tblwrap">
+      <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21" stroke-linecap="round"/>
+        </svg>
+        还没有查询结果
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const qEl = $('#q'), bulkEl = $('#bulk'), histEl = $('#hist');
+  const HKEY = 'ipq.history.v1';
+  let results = [];
+  let histIdx = -1, histItems = [];
+
+  // ---------- 工具 ----------
+  function toast(msg){
+    const t = $('#toast');
+    t.textContent = msg; t.classList.add('on');
+    clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('on'), 1500);
+  }
+  function fmtSize(n){
+    if(!n) return '—';
+    if(n >= 1e6) return (n/1e4).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,'') + '万';
+    if(n >= 1e4) return (n/1e4).toFixed(2) + '万';
+    return n.toLocaleString('zh-CN');
+  }
+  function esc(s){
+    return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function cell(v){
+    return v ? esc(v) : '<span class="empty-cell">—</span>';
+  }
+
+  // ---------- 历史 ----------
+  function getHist(){
+    try { return JSON.parse(localStorage.getItem(HKEY) || '[]'); } catch(e){ return []; }
+  }
+  function saveHist(list){
+    localStorage.setItem(HKEY, JSON.stringify(list.slice(0,15)));
+  }
+  function pushHist(ip){
+    ip = ip.trim(); if(!ip) return;
+    let list = getHist().filter(x => x !== ip);
+    list.unshift(ip); saveHist(list);
+  }
+  function renderHist(filter){
+    const all = getHist();
+    histItems = filter ? all.filter(x => x.toLowerCase().includes(filter.toLowerCase())) : all;
+    histIdx = -1;
+    if(!all.length){
+      histEl.innerHTML = '<div class="empty">还没有查询记录</div>';
+      return;
+    }
+    if(!histItems.length){
+      histEl.innerHTML = '<div class="empty">没有匹配的记录</div>';
+      return;
+    }
+    histEl.innerHTML = '<div class="hd">最近查询</div>' + histItems.map((x,i)=>
+      `<div class="it" data-i="${i}"><span class="t">${esc(x)}</span><span class="x" data-del="${i}">删</span></div>`
+    ).join('');
+  }
+  function openHist(){
+    renderHist(qEl.value.trim());
+    histEl.classList.add('on');
+  }
+  function closeHist(){
+    histEl.classList.remove('on');
+    histIdx = -1;
+  }
+  function markHist(){
+    [...histEl.querySelectorAll('.it')].forEach((el,i)=> el.classList.toggle('sel', i===histIdx));
+    const sel = histEl.querySelector('.it.sel');
+    if(sel) sel.scrollIntoView({block:'nearest'});
+  }
+
+  histEl.addEventListener('mousedown', e => {
+    const del = e.target.closest('[data-del]');
+    if(del){
+      e.preventDefault();
+      const list = getHist(); list.splice(+del.dataset.del, 1); saveHist(list);
+      renderHist(qEl.value.trim());
+      return;
+    }
+    const it = e.target.closest('.it');
+    if(it){
+      e.preventDefault();
+      qEl.value = histItems[+it.dataset.i];
+      closeHist();
+      runSingle();
+    }
+  });
+
+  qEl.addEventListener('focus', openHist);
+  qEl.addEventListener('input', ()=>{ renderHist(qEl.value.trim()); histEl.classList.add('on'); });
+  qEl.addEventListener('keydown', e => {
+    if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+      if(!histEl.classList.contains('on')) openHist();
+      if(!histItems.length) return;
+      e.preventDefault();
+      histIdx = e.key === 'ArrowDown'
+        ? (histIdx + 1) % histItems.length
+        : (histIdx - 1 + histItems.length) % histItems.length;
+      markHist();
+    } else if(e.key === 'Enter'){
+      if(histIdx >= 0 && histItems[histIdx]){
+        e.preventDefault();
+        qEl.value = histItems[histIdx];
+        closeHist(); runSingle();
+      } else {
+        closeHist(); runSingle();
+      }
+    } else if(e.key === 'Escape'){
+      closeHist();
+      qEl.value = '';
+    }
+  });
+  document.addEventListener('click', e => {
+    if(!e.target.closest('.searchbox')) closeHist();
+  });
+
+  $('#clearQ').addEventListener('click', ()=>{ qEl.value=''; qEl.focus(); });
+  $('#histBtn').addEventListener('click', ()=>{ qEl.focus(); openHist(); });
+
+  // ---------- 查询 ----------
+  async function doLookup(text){
+    if(!text.trim()) return;
+    const btns = [$('#go'), $('#goBulk')];
+    btns.forEach(b => b.disabled = true);
+    try{
+      const r = await fetch('/api/lookup', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({text})
+      });
+      if(!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      results = data.results || [];
+      render();
+      const firstIP = results.find(x => x.ok);
+      if(firstIP && results.length === 1) pushHist(text.trim());
+    }catch(err){
+      toast('查询失败：' + err.message);
+    }finally{
+      btns.forEach(b => b.disabled = false);
+    }
+  }
+
+  function runSingle(){
+    const v = qEl.value.trim();
+    if(!v) return;
+    pushHist(v);
+    doLookup(v);
+  }
+
+  // ---------- 渲染 ----------
+  function render(){
+    const wrap = $('#tblwrap');
+
+    // 汇总
+    const ok = results.filter(x => x.ok);
+    const has = f => ok.filter(f).length;
+    const pct = n => ok.length ? Math.round(n/ok.length*100) + '%' : '—';
+    const s = [
+      ['总数', results.length, ''],
+      ['有省', has(x=>x.province), pct(has(x=>x.province))],
+      ['有市', has(x=>x.city), pct(has(x=>x.city))],
+      ['有区县', has(x=>x.county), pct(has(x=>x.county))],
+      ['有镇', has(x=>x.town), pct(has(x=>x.town))],
+      ['有 ISP', has(x=>x.isp), pct(has(x=>x.isp))],
+    ];
+    $('#stats').innerHTML = s.map(([k,v,p])=>
+      `<span class="kv"><span>${k}</span><b>${v}</b>${p?`<span class="pct">${p}</span>`:''}</span>`
+    ).join('');
+
+    if(!results.length){
+      wrap.innerHTML = '<div class="empty">没有结果</div>';
+      return;
+    }
+
+    const rows = results.map((r,i) => {
+      if(!r.ok){
+        return `<tr><td class="dim">${i+1}</td><td class="mono ip">${esc(r.query)}</td>
+          <td colspan="8"><span class="err">${esc(r.err || '无数据')}</span></td></tr>`;
+      }
+      const big = r.size >= 65536 ? ' big' : '';
+      const county = r.county
+        ? `<span class="tag green">${esc(r.county)}</span>`
+        : '<span class="empty-cell">—</span>';
+      return `<tr data-i="${i}">
+        <td class="dim">${i+1}</td>
+        <td class="mono ip">${esc(r.ip)}</td>
+        <td class="mono dim">${esc(r.start)} – ${esc(r.end)}</td>
+        <td class="size${big}" title="该归属覆盖 ${r.size.toLocaleString('zh-CN')} 个 IP">${fmtSize(r.size)}</td>
+        <td>${cell(r.country)}</td>
+        <td>${cell(r.province)}</td>
+        <td>${cell(r.city)}</td>
+        <td>${county}</td>
+        <td>${cell(r.town)}</td>
+        <td>${r.isp ? `<span class="tag">${esc(r.isp)}</span>` : '<span class="empty-cell">—</span>'}</td>
+      </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `<table>
+      <thead><tr>
+        <th style="width:46px">#</th>
+        <th style="width:132px">IP</th>
+        <th style="width:200px">所属段</th>
+        <th style="width:82px">段大小</th>
+        <th style="width:74px">国家</th>
+        <th style="width:124px">省</th>
+        <th style="width:124px">市</th>
+        <th style="width:104px">区县</th>
+        <th style="width:104px">镇</th>
+        <th>ISP</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  // 点行复制 TSV
+  $('#tblwrap').addEventListener('click', e => {
+    const tr = e.target.closest('tbody tr[data-i]');
+    if(!tr) return;
+    const r = results[+tr.dataset.i];
+    if(!r || !r.ok) return;
+    const line = [r.ip, r.country, r.province, r.city, r.county, r.town, r.isp].join('\t');
+    navigator.clipboard?.writeText(line).then(
+      ()=>toast('已复制：' + r.ip),
+      ()=>toast('复制失败')
+    );
+  });
+
+  // ---------- 事件 ----------
+  $('#go').addEventListener('click', runSingle);
+  $('#goBulk').addEventListener('click', ()=> doLookup(bulkEl.value));
+  bulkEl.addEventListener('keydown', e => {
+    if((e.ctrlKey || e.metaKey) && e.key === 'Enter'){ e.preventDefault(); doLookup(bulkEl.value); }
+  });
+  $('#sample').addEventListener('click', ()=>{
+    bulkEl.value = [
+      '183.3.149.185', '121.8.210.121', '223.5.5.5', '1.12.0.1',
+      '119.29.64.1', '59.192.1.1', '42.128.1.1', '1.2.8.1',
+      '61.133.214.171', '222.92.95.245', '8.8.8.8', '114.114.114.114'
+    ].join('\n');
+    bulkEl.focus();
+  });
+  $('#clearAll').addEventListener('click', ()=>{ results = []; render(); $('#stats').innerHTML=''; });
+
+  // ---------- 启动 ----------
+  // 支持直接用链接打开：?ip=1.1.1.1 或 ?text=<多行，用 %0A 分隔>
+  (function initFromURL(){
+    const p = new URLSearchParams(location.search);
+    const one = p.get('ip'), many = p.get('text');
+    if(many){ bulkEl.value = many; doLookup(many); }
+    else if(one){ qEl.value = one; doLookup(one); }
+  })();
+
+  fetch('/api/meta').then(r=>r.json()).then(m=>{
+    const mb = (m.bytes/1024/1024).toFixed(1);
+    $('#meta').innerHTML = `库 <b>${esc(m.file)}</b> · <b>${mb} MB</b>` +
+      (m.sample && m.sample.length ? ` · 自检 ${m.sample.length} 条通过` : '');
+  }).catch(()=>{ $('#meta').textContent = '库信息读取失败'; });
+})();
+</script>
+</body>
+</html>
