@@ -115,6 +115,8 @@ type SegmentUpdate struct {
 	Start    uint32
 	Province *string
 	City     *string
+	County   *string
+	Town     *string
 	ISP      *string
 	Source   string // 例: "qqwry+baidu"
 }
@@ -140,6 +142,14 @@ func (s *DB) UpdateSegments(ups []SegmentUpdate) error {
 		if u.City != nil {
 			sets = append(sets, "city = ?")
 			args = append(args, *u.City)
+		}
+		if u.County != nil {
+			sets = append(sets, "county = ?")
+			args = append(args, *u.County)
+		}
+		if u.Town != nil {
+			sets = append(sets, "town = ?")
+			args = append(args, *u.Town)
 		}
 		if u.ISP != nil {
 			sets = append(sets, "isp = ?")

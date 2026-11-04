@@ -3,6 +3,7 @@ module github.com/hel2o/ip2region
 go 1.26.0
 
 require (
+	github.com/oschwald/maxminddb-golang/v2 v2.9.0
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.61.1
 )

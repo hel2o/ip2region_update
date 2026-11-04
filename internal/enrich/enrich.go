@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/hel2o/ip2region/internal/geo"
+	"github.com/hel2o/ip2region/internal/geocn"
 	"github.com/hel2o/ip2region/internal/ispip"
 	"github.com/hel2o/ip2region/internal/provider"
 	"github.com/hel2o/ip2region/internal/regions"
@@ -43,12 +44,15 @@ type Options struct {
 	MaxConflicts int    // 冲突文件最多写多少行
 	Override     bool   // 是否允许覆盖已有省市（默认 false，只补空）
 	ISPTables    *ispip.Table // 运营商网段表（nil=不按网段判 ISP）
+	GeoCN        *geocn.DB    // GeoCN 离线库（nil=不补区县）
 }
 
 // Stats 是执行统计。
 type Stats struct {
 	ISPFilledByNet int // 网段表补充的 ISP
 	ISPFixedByNet  int // 网段表纠正的 ISP（云/IDC 优先）
+	CountyFilled   int // GeoCN 补的区县
+	GeoCNConflict  int // GeoCN 与现有省市不一致而放弃的段
 	Segments   int // 参与增强的段数（中国段）
 	Probes     int // 去重后的探测点数
 	DBHits     int // 命中 SQLite 缓存
@@ -98,6 +102,14 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		}
 		st.ISPFilledByNet, st.ISPFixedByNet = filled, fixed
 		log.Printf("网段表定 ISP: 补空 %d 段, 纠正 %d 段", filled, fixed)
+	}
+
+	// 0.5 用 GeoCN 补区县（其他源都到不了这一级）
+	if opt.GeoCN != nil {
+		g := applyGeoCN(db, segs, opt.GeoCN, opt.DryRun)
+		st.CountyFilled, st.GeoCNConflict = g.county, g.conflict
+		log.Printf("GeoCN 补区县: %d 段（省市不一致放弃 %d 段，云段跳过 %d 段）",
+			g.county, g.conflict, g.cloud)
 	}
 
 	// 1. 组装 probe 列表（按 /24 去重）
@@ -300,6 +312,78 @@ type kindCount struct{ prov, city, isp int }
 type confInfo struct {
 	n      int
 	sample string
+}
+
+// geocnResult 是 GeoCN 预处理的统计。
+type geocnResult struct {
+	county, city, prov, conflict, cloud int
+}
+
+// applyGeoCN 用 GeoCN 补区县。
+//
+// 硬规则：
+//   - 只补空，绝不覆盖已有区县（qqwry 有的 36,493 段区县没有证据说 GeoCN 更准）
+//   - 省市必须自洽：GeoCN 的省/市与我们已有的值不一致就整条放弃，
+//     否则会产出"吉林省长春市|玄武区"这种错位数据
+//   - 云/CDN/IDC 段跳过：GeoCN 也是扫描 API 得来的，云段给的是 PoP 城市
+func applyGeoCN(db *store.DB, segs []geo.Segment, gc *geocn.DB, dryRun bool) geocnResult {
+	var res geocnResult
+	var batch []store.SegmentUpdate
+	flush := func() {
+		if !dryRun && len(batch) > 0 {
+			_ = db.UpdateSegments(batch)
+		}
+		batch = batch[:0]
+	}
+
+	for i := range segs {
+		sg := &segs[i]
+		if sg.Geo.Country != "中国" || sg.Geo.County != "" {
+			continue
+		}
+		if regions.IsCloudISP(sg.Geo.ISP) {
+			res.cloud++
+			continue
+		}
+		mid := uint32((uint64(sg.Start) + uint64(sg.End)) / 2)
+		info, ok := gc.Lookup(mid)
+		if !ok || !info.HasDistrict() {
+			continue
+		}
+		if sg.Geo.Province != "" && !sameName(sg.Geo.Province, info.Province) {
+			res.conflict++
+			continue
+		}
+		if sg.Geo.City != "" && info.City != "" && !sameName(sg.Geo.City, info.City) {
+			res.conflict++
+			continue
+		}
+
+		up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+geocn")}
+		if sg.Geo.Province == "" && info.Province != "" {
+			v := info.Province
+			up.Province = &v
+			sg.Geo.Province = v
+			res.prov++
+		}
+		if sg.Geo.City == "" && info.City != "" {
+			v := info.City
+			up.City = &v
+			sg.Geo.City = v
+			res.city++
+		}
+		v := info.District
+		up.County = &v
+		sg.Geo.County = v
+		res.county++
+
+		batch = append(batch, up)
+		if len(batch) >= 5000 {
+			flush()
+		}
+	}
+	flush()
+	return res
 }
 
 // applyISPTables 用运营商网段表设置 ISP。

@@ -83,7 +83,7 @@ go run ./cmd/ip2region verify -n 50000
 - Go 1.26（见 `go.mod`）。下限被 `modernc.org/sqlite` 和 `golang.org/x/text` 拉高了，
   想降到更低版本需要同时降这两个依赖
 - 无需 CGO：SQLite 用纯 Go 驱动 `modernc.org/sqlite`，Windows 上直接编译，不用装 gcc
-- 能访问 `raw.githubusercontent.com`、`github.com`（下载 qqwry）、
+- 能访问 `raw.githubusercontent.com`、`github.com`（下载 qqwry 与 GeoCN）、
   `ispip.m27.tech`（下载运营商网段表）、`opendata.baidu.com`（补空）
 - 磁盘约 200MB（qqwry.dat 27MB + SQLite 300MB 左右，缓存表是主要占用）
 
@@ -97,7 +97,7 @@ go build ./cmd/ip2region    # 也可以编译成单二进制
 
 | 命令 | 作用 | 产物 | 耗时（实测） |
 |---|---|---|---|
-| `fetch` | 下载 `qqwry.dat` + 运营商网段表 | `data/qqwry.dat`、`data/ispip/` | 30 秒 |
+| `fetch` | 下载 `qqwry.dat` + 网段表 + GeoCN | `data/qqwry.dat`、`data/ispip/`、`data/geocn/` | 40 秒 |
 | `parse` | 解析 dat，拆省市区镇，落 SQLite | `data/ip2region.db` | 10 秒 |
 | `enrich` | 调百度补省市/ISP | 改写段表 + `ip_cache` | 首次 30 分钟，缓存后 25 秒 |
 | `refine` | 大段二分收敛细分 | 段表拆分 | 首次 13 分钟，缓存后 14 秒 |
@@ -141,6 +141,7 @@ go run ./cmd/ip2region fetch -force                # 内容相同也重写
 1. 从 `metowolf/qqwry.dat` 的 release 拉最新 dat，先下到临时文件，校验体积（≥10MB）和 md5
    后才原子替换，内容没变就不动
 2. 从 `ispip.m27.tech` 下载 21 个运营商/云厂商网段表到 `data/ispip/`（约 768KB）
+3. 从 `ljxi/GeoCN` 下载离线库 `GeoCN.mmdb`（8.6MB）与行政区划编码表 `full.txt` 到 `data/geocn/`
 
 ```bash
 go run ./cmd/ip2region fetch -skip-qqwry     # 只更新网段表
@@ -189,6 +190,7 @@ go run ./cmd/ip2region enrich -only-empty
 | `-dry-run` | false | 只统计不写段表（**仍会写缓存**，避免重复烧请求） |
 | `-override` | false | 允许覆盖已有省市，默认只补空 |
 | `-ispip` | `data/ispip` | 运营商网段表目录，空串表示不用（建表前先跑 `fetch`） |
+| `-geocn` | `data/geocn/GeoCN.mmdb` | GeoCN 离线库，空串表示不补区县 |
 | `-only-empty` | false | 只处理省市缺失的段 |
 | `-conflicts` | `build/enrich-conflicts.tsv` | ISP 冲突样例输出，空字符串则不写 |
 | `-timeout` | 10s | 单请求超时 |
@@ -237,6 +239,40 @@ enrich 会先用它定 ISP：
 
 实测它的判断和 qqwry 的 ISP 一致率 91.1%（有覆盖的段中），分歧里有 284 段是
 "qqwry 说长城宽带、网段表说腾讯云"——这类是真实转售关系，按优先级改对了。
+
+### GeoCN 区县补全
+
+[ljxi/GeoCN](https://github.com/ljxi/GeoCN) 是 MMDB 格式的离线库，只有两个字段：
+`division_code`（国标行政区划编码）和 `isp`（7 种粗标签）。
+
+**它的价值只在区县**——这是唯一能碰到区县级的源。数据实测：
+
+| 指标 | 数值 |
+|---|---|
+| IPv4 网段数 | 1,113,398 |
+| 覆盖中国 IP | 3.45 亿（占中国空间 86%） |
+| 其中区县级编码 | 1.87 亿 IP（54%） |
+| 与我们省份一致率 | 96.4% |
+| 与我们城市一致率 | 81.0% |
+
+**合并规则（只补不覆盖）：**
+
+| 情况 | 动作 |
+|---|---|
+| 我们区县为空 + 省市与 GeoCN 一致 + 非云段 | 填区县（实测 58,477 段） |
+| 我们省市为空 | 顺手补上（保证与区县自洽） |
+| 我们区县已存在 | **不动**（36,493 段与 GeoCN 不同，没有证据说它更准） |
+| GeoCN 的省市与我们不一致 | **整条放弃**（10,326 段），否则会产出"吉林省长春市\|玄武区"这种错位数据 |
+| 云/CDN/IDC 段 | 跳过，GeoCN 也是扫 API 来的，云段给的是 PoP 城市 |
+
+效果：**区县覆盖率 4.67% → 40.67%**（1885 万 → 1.64 亿 IP）。
+
+已知短板：
+
+- 更新"随缘"（README 原话），当前库是 2026-04 的，可能滞后
+- ISP 只有 7 种粗标签（电信/联通/移动/鹏博士/教育网/广电），比网段表粗，所以不用它判 ISP
+- 不覆盖港澳台（只含中国大陆）
+- 云厂商段同样会给出 PoP 城市，与百度一个毛病
 
 ### refine：大段细分
 
@@ -472,15 +508,16 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 |---|---|---|---|
 | 省 | 95.84% | **99.08%** | qqwry + 百度补空 |
 | 市 | 81.18% | **91.54%** | qqwry + 百度补空 |
-| 区县 | 4.67% | 4.67% | 只有 qqwry 有，数据源就少 |
-| 乡镇 | 15.01% | 15.01% | 同上 |
+| 区县 | 4.67% | **40.67%** | qqwry + GeoCN 补空 |
+| 乡镇 | 15.01% | 14.55% | 只有 qqwry 有（GeoCN 没有镇级） |
 | ISP | 85.00% | **90.48%** | qqwry + 网段表 + 百度补空 |
 
 ### 三个硬限制，先说清楚
 
-1. **区/镇覆盖率低（4.67% / 15.01%），这是数据源的天花板。**
-   `qqwry` 本身就是城市级库，只有少数段标到区；百度接口只到"省+市+ISP"。
-   任何声称能用百度补区镇的方案都是自欺欺人。要更高精度只能靠自定义覆盖。
+1. **乡镇覆盖率低（14.55%），这是数据源的天花板。**
+   区县靠 GeoCN 提到了 40.67%，但**镇级没有任何源提供**——qqwry 的 area 字段偶尔有，
+   百度、GeoCN、运营商网段表都没有。要镇级精度只能靠自定义覆盖。
+   剩下的 59% 区县空缺，是因为 GeoCN 本身只到市级，或省市与我们不一致而主动放弃。
 
 2. **百度不能用来覆盖已有值。**
    交叉验证（ipwho.is / ipapi.is / ip-api 三个独立源）显示，百度与 qqwry 在省市上
@@ -496,6 +533,7 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 |---|---|---|
 | 基础归属 | [metowolf/qqwry.dat](https://github.com/metowolf/qqwry.dat) | 每周 |
 | 运营商归属 | [ispip.m27.tech](https://ispip.m27.tech/)（APNIC + whois） | 每日 |
+| 区县补全 | [ljxi/GeoCN](https://github.com/ljxi/GeoCN)（扫描公开 API + 国标编码） | 随缘 |
 | 省市/ISP 补空 | 百度 opendata IP 接口（`resource_id=6006`） | 实时 |
 | 人工规则 | `data/custom/*.txt` | 你说了算 |
 
@@ -604,6 +642,7 @@ internal/regions/       行政区划切分、ISP 归一（含港澳台运营商�
 internal/store/         SQLite：段表 / ip_cache / meta
 internal/provider/      外部数据源接口 + 百度实现
 internal/ispip/         运营商网段表解析（APNIC 分配归属）
+internal/geocn/         GeoCN MMDB 读取 + 行政区划编码翻译
 internal/enrich/        /24 去重、限流、缓存复用、冲突裁定
 internal/refine/        大段二分收敛细分
 internal/xdbmaker/      官方 xdb maker + searcher（Apache 2.0，收编进仓库自包含）
@@ -644,6 +683,7 @@ go test ./...
 | `internal/enrich` | 补空、覆盖、云段保护、低置信度保护、ISP 冲突 8 个子用例 |
 | `internal/refine` | 大段切分、三点一致不细分、云段不被覆盖、区镇保留 |
 | `internal/ispip` | CIDR 解析、云厂商优先于运营商、兜底桶不当 ISP、/14 边界 |
+| `internal/geocn` | 编码表解析、省级编码不带区县、真实库抽样冒烟 |
 
 改 `decide` / `applyTo` 里的规则前，先看对应测试——那些用例记录了踩过的坑。
 

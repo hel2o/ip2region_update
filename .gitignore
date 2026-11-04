@@ -8,3 +8,4 @@ data/*.db-*
 testdata/golden/
 ip2region_update/
 data/ispip/
+data/geocn/

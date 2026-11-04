@@ -7,10 +7,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/hel2o/ip2region/internal/enrich"
+	"github.com/hel2o/ip2region/internal/geocn"
 	"github.com/hel2o/ip2region/internal/ispip"
 	"github.com/hel2o/ip2region/internal/provider"
 	"github.com/hel2o/ip2region/internal/store"
@@ -29,6 +31,7 @@ func runEnrich(args []string) error {
 	conflictFile := fs.String("conflicts", "build/enrich-conflicts.tsv", "冲突样例输出（空则不写）")
 	override := fs.Bool("override", false, "允许用百度覆盖已有省市（默认只补空）")
 	ispDir := fs.String("ispip", "data/ispip", "运营商网段表目录（空串=不用）")
+	geocnPath := fs.String("geocn", "data/geocn/GeoCN.mmdb", "GeoCN 离线库路径（空串=不补区县）")
 	_ = fs.Parse(args)
 
 	m, err := parseMask(*mask)
@@ -65,6 +68,21 @@ func runEnrich(args []string) error {
 		}
 	}
 
+	var gcn *geocn.DB
+	if *geocnPath != "" {
+		codePath := filepath.Join(filepath.Dir(*geocnPath), "full.txt")
+		if _, statErr := os.Stat(*geocnPath); statErr == nil {
+			gcn, err = geocn.Open(*geocnPath, codePath)
+			if err != nil {
+				return err
+			}
+			defer gcn.Close()
+			log.Printf("GeoCN 离线库已加载（行政区划编码 %d 条）", gcn.CodeCount())
+		} else {
+			log.Printf("GeoCN 库 %s 不存在，跳过补区县", *geocnPath)
+		}
+	}
+
 	p := provider.NewBaidu(*timeout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -84,6 +102,7 @@ func runEnrich(args []string) error {
 		ConflictFile: *conflictFile,
 		Override:     *override,
 		ISPTables:    ispTables,
+		GeoCN:        gcn,
 	})
 
 	fmt.Println("---- enrich 统计 ----")
@@ -98,6 +117,8 @@ func runEnrich(args []string) error {
 	fmt.Printf("填充 ISP（百度）    : %d\n", st.ISPFilled)
 	fmt.Printf("补 ISP（网段表）    : %d\n", st.ISPFilledByNet)
 	fmt.Printf("纠 ISP（网段表）    : %d\n", st.ISPFixedByNet)
+	fmt.Printf("补区县（GeoCN）     : %d\n", st.CountyFilled)
+	fmt.Printf("GeoCN 省市不一致放弃: %d\n", st.GeoCNConflict)
 	fmt.Printf("ISP 冲突(仅记录)    : %d\n", st.Conflicts)
 	fmt.Printf("耗时                : %s\n", st.Elapsed.Round(time.Millisecond))
 

@@ -18,6 +18,9 @@ import (
 const (
 	qqwryVersionURL  = "https://raw.githubusercontent.com/metowolf/qqwry.dat/main/version.json"
 	qqwryDownloadURL = "https://github.com/metowolf/qqwry.dat/releases/latest/download/qqwry.dat"
+
+	geocnMMDBURL  = "https://github.com/ljxi/GeoCN/releases/latest/download/GeoCN.mmdb"
+	geocnCodesURL = "https://raw.githubusercontent.com/ljxi/GeoCN/main/data/full.txt"
 )
 
 // runFetch 下载最新的 metowolf 版 qqwry.dat。
@@ -28,6 +31,7 @@ func runFetch(args []string) error {
 	fs := newFlagSet("fetch", "下载最新 qqwry.dat")
 	out := fs.String("out", "data/qqwry.dat", "保存路径")
 	ispDir := fs.String("ispip", "data/ispip", "运营商网段表目录（空串=不下）")
+	geocnDir := fs.String("geocn", "data/geocn", "GeoCN 目录（空串=不下）")
 	skipQqwry := fs.Bool("skip-qqwry", false, "跳过 qqwry.dat 下载")
 	force := fs.Bool("force", false, "即使内容相同也重写")
 	_ = fs.Parse(args)
@@ -36,6 +40,11 @@ func runFetch(args []string) error {
 
 	if *ispDir != "" {
 		if err := fetchISPIP(client, *ispDir); err != nil {
+			return err
+		}
+	}
+	if *geocnDir != "" {
+		if err := fetchGeoCN(client, *geocnDir); err != nil {
 			return err
 		}
 	}
@@ -128,6 +137,46 @@ func fetchISPIP(c *http.Client, dir string) error {
 	if ok == 0 {
 		return fmt.Errorf("网段表全部下载失败，检查网络或站点是否可用")
 	}
+	return nil
+}
+
+// fetchGeoCN 下载 GeoCN 离线库（MMDB）与行政区划编码表。
+// 数据源：https://github.com/ljxi/GeoCN
+func fetchGeoCN(c *http.Client, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	mmdb := filepath.Join(dir, "GeoCN.mmdb")
+	tmp := mmdb + ".tmp"
+	if err := download(c, geocnMMDBURL, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("下载 GeoCN.mmdb: %w", err)
+	}
+	fi, err := os.Stat(tmp)
+	if err != nil {
+		return err
+	}
+	// GeoCN.mmdb 约 9MB，明显偏小说明下到了错误页
+	if fi.Size() < 1<<20 {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("GeoCN.mmdb 体积异常（%d 字节）", fi.Size())
+	}
+	if err := os.Rename(tmp, mmdb); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+
+	codes := filepath.Join(dir, "full.txt")
+	if err := download(c, geocnCodesURL, codes+".tmp"); err != nil {
+		_ = os.Remove(codes + ".tmp")
+		return fmt.Errorf("下载行政区划编码表: %w", err)
+	}
+	if err := os.Rename(codes+".tmp", codes); err != nil {
+		return err
+	}
+
+	log.Printf("GeoCN: GeoCN.mmdb (%.1f MB) + full.txt → %s", float64(fi.Size())/1024/1024, dir)
 	return nil
 }
 
