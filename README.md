@@ -365,6 +365,15 @@ go run ./cmd/ip2region verify -golden other.xdb -n 50000   # 换基准库
 
 ### stats：质量报表
 
+末尾还会做一次**省市自洽检查**：用行政区划编码表里的从属关系，找出"市不属于该省"的段。
+
+```
+省市自洽检查        : 通过（无跨省组合）
+```
+
+这条检查与数据源无关，任何来源（qqwry 原始数据、百度、GeoCN、自定义覆盖）引入的错位都能发现。
+当前库只剩 1 段：`27.222.69.0 山东省|德阳市`（qqwry 原始数据错误，德阳在四川）。
+
 ```bash
 go run ./cmd/ip2region stats
 go run ./cmd/ip2region stats -db other.db

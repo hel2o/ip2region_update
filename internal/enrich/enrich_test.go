@@ -131,3 +131,28 @@ func TestTrimAdminSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestFillPairKeepsProvinceCityConsistent(t *testing.T) {
+	cases := []struct {
+		name             string
+		prov, city       string
+		resProv, resCity string
+		wantProv, wantCity string
+	}{
+		{"省有市空且百度省不一致：不填市", "江西省", "", "广东省", "广州市", "江西省", ""},
+		{"省有市空且百度省一致：填市", "广东省", "", "广东省", "广州市", "广东省", "广州市"},
+		{"省空市有且百度市一致：填省", "", "广州市", "广东省", "广州市", "广东省", "广州市"},
+		{"省空市有且百度市不同：不填省", "", "广州市", "江西省", "南昌市", "", "广州市"},
+		{"省市都空：成对填", "", "", "广东省", "广州市", "广东省", "广州市"},
+		{"省市都有：补空不动", "江西省", "南昌市", "广东省", "广州市", "江西省", "南昌市"},
+		{"百度只给省且市为空：填省", "", "", "广东省", "", "广东省", ""},
+	}
+	for _, c := range cases {
+		g := &geo.GeoInfo{Country: "中国", Province: c.prov, City: c.city}
+		FillPair(g, provider.Result{Province: c.resProv, City: c.resCity})
+		if g.Province != c.wantProv || g.City != c.wantCity {
+			t.Errorf("%s: got %s|%s want %s|%s",
+				c.name, g.Province, g.City, c.wantProv, c.wantCity)
+		}
+	}
+}

@@ -337,18 +337,19 @@ func applyTo(res provider.Result, old geo.GeoInfo) geo.GeoInfo {
 
 	switch {
 	case virtual:
-		if out.Province == "" {
-			out.Province = res.Province
-		}
-		if out.City == "" {
-			out.City = res.City
-		}
-	case res.Province != "" && out.City != "" && res.City == "":
-		// 低置信度，省市都不动
+		// 云段只补空，且省/市必须成对自洽
+		enrich.FillPair(&out, res)
+
+	case res.Province == "":
+		// 百度没给省：无法验证市属于哪个省，只补空不动已有值
+		enrich.FillPair(&out, res)
+
+	case out.City != "" && res.City == "":
+		// 低置信度：说换省却给不出市，省市都不动
+
 	default:
-		if res.Province != "" {
-			out.Province = res.Province
-		}
+		// 三点探测一致，省市成对覆盖，天然自洽
+		out.Province = res.Province
 		if res.City != "" {
 			out.City = res.City
 		}

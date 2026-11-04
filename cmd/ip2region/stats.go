@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/hel2o/ip2region/internal/geo"
@@ -14,6 +17,7 @@ import (
 func runStats(args []string) error {
 	fs := newFlagSet("stats", "输出归属库质量报表（IP 加权覆盖率）")
 	dbPath := fs.String("db", "data/ip2region.db", "SQLite 路径")
+	codeFile := fs.String("codes", "data/geocn/full.txt", "行政区划编码表（用于省市自洽检查，空串=跳过）")
 	_ = fs.Parse(args)
 
 	db, err := store.Open(*dbPath)
@@ -95,8 +99,87 @@ func runStats(args []string) error {
 			geo.Uint2IP(start), geo.Uint2IP(end), end-start+1, toS(row[2]), toS(row[3]), toS(row[4]))
 	}
 
+	if *codeFile != "" {
+		if msg, err := checkProvinceCity(db, *codeFile); err == nil {
+			fmt.Println(msg)
+		}
+	}
+
 	fmt.Printf("\n耗时 %s\n", time.Since(t0).Round(time.Millisecond))
 	return nil
+}
+
+// checkProvinceCity 检查"市不属于该省"的段（如 江西省|广州市 这种错位组合）。
+//
+// 用在行政区划编码表里 "市码→省码" 的从属关系判定，与数据源无关，
+// 所以能发现任何来源引入的错位（包括 qqwry 原始数据和自定义覆盖）。
+func checkProvinceCity(db *store.DB, codeFile string) (string, error) {
+	f, err := os.Open(codeFile)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	provOf := map[string]string{} // 省码 → 省名
+	cityProv := map[string]string{} // 市码 → 省码
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		code, name, ok := strings.Cut(strings.TrimSpace(sc.Text()), "\t")
+		if !ok || len(code) != 6 {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(code, "0000"):
+			provOf[code[:2]] = name
+		case strings.HasSuffix(code, "00"):
+			cityProv[name] = code[:2]
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+
+	rows, err := db.QueryRows(`SELECT start_ip, end_ip, province, city, source
+		FROM segments WHERE country='中国' AND province <> '' AND city <> ''`)
+	if err != nil {
+		return "", err
+	}
+	var badSeg int
+	var badIP int64
+	var samples []string
+	for _, r := range rows {
+		prov, city := toS(r[2]), toS(r[3])
+		pc, ok := cityProv[city]
+		if !ok {
+			// 城市名可能带/不带"市"后缀，试一次去掉后缀
+			if c2, ok2 := cityProv[city+"市"]; ok2 {
+				pc, ok = c2, true
+			}
+		}
+		if !ok {
+			continue
+		}
+		if provOf[pc] != prov {
+			badSeg++
+			badIP += toI(r[1]) - toI(r[0]) + 1
+			if len(samples) < 5 {
+				samples = append(samples, fmt.Sprintf("%s %s|%s", geo.Uint2IP(uint32(toI(r[0]))), prov, city))
+			}
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n省市自洽检查        : ", )
+	if badSeg == 0 {
+		fmt.Fprintf(&b, "通过（无跨省组合）")
+	} else {
+		fmt.Fprintf(&b, "%d 段 / %d IP 存在\"市不属于该省\"", badSeg, badIP)
+		for _, s := range samples {
+			fmt.Fprintf(&b, "\n  %s", s)
+		}
+	}
+	return b.String(), nil
 }
 
 func printCoverage(name string, covered, total int64) {

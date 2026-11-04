@@ -472,6 +472,59 @@ func trimAdminSuffix(s string) string {
 	return s
 }
 
+// FillPair 按"省/市必须自洽"的原则补空，返回实际填了省、填了市。
+//
+// 只看空白字段独立填空会产出跨省组合：qqwry 给"江西省"、市为空，
+// 百度给"广东省/广州市"，各填各的就成了"江西省|广州市"。
+// 所以补任何一半，都要求另一半能与已有值对上：
+//
+//	省空+市空    → 成对填（都来自同一条百度结果，天然自洽）
+//	省空+市有    → 只有百度给出的市与已有市一致时才补省
+//	省有+市空    → 只有百度给出的省与已有省一致时才补市
+//	省有+市有    → 不是"补空"，交给覆盖分支
+func FillPair(g *geo.GeoInfo, res provider.Result) (provSet, citySet bool) {
+	provEmpty := g.Province == ""
+	cityEmpty := g.City == ""
+
+	switch {
+	case provEmpty && cityEmpty:
+		if res.Province != "" {
+			g.Province = res.Province
+			provSet = true
+		}
+		if res.City != "" {
+			g.City = res.City
+			citySet = true
+		}
+	case provEmpty && !cityEmpty:
+		if res.Province != "" && res.City != "" && sameName(res.City, g.City) {
+			g.Province = res.Province
+			provSet = true
+		}
+	case !provEmpty && cityEmpty:
+		if res.City != "" && res.Province != "" && sameName(res.Province, g.Province) {
+			g.City = res.City
+			citySet = true
+		}
+	}
+	return
+}
+
+// fillPair 把 FillPair 的结果记到待写库的更新上。
+func fillPair(g *geo.GeoInfo, res provider.Result, up *store.SegmentUpdate, k *kindCount) {
+	provSet, citySet := FillPair(g, res)
+	if provSet {
+		v := g.Province
+		up.Province = &v
+		k.prov++
+	}
+	if citySet {
+		v := g.City
+		up.City = &v
+		k.city++
+	}
+}
+
 // decide 决定某个探测点的结果如何应用到其所有段上。
 //
 // 三种动作，优先级从高到低：
@@ -495,17 +548,8 @@ func decide(segs []geo.Segment, pr *probe, res provider.Result, override bool) (
 		provEmpty := sg.Geo.Province == ""
 		cityEmpty := sg.Geo.City == ""
 
-		// 1. 补空
-		if provEmpty && res.Province != "" {
-			v := res.Province
-			up.Province = &v
-			k.prov++
-		}
-		if cityEmpty && res.City != "" {
-			v := res.City
-			up.City = &v
-			k.city++
-		}
+		// 1. 补空（省市必须成对自洽，否则会产出"江西省|广州市"这种错位组合）
+		fillPair(&sg.Geo, res, &up, &k)
 
 		// 2. 覆盖（云/CDN 段禁止覆盖：地理位置由路由决定，探到的是 PoP 城市）
 		if override && !regions.IsCloudISP(sg.Geo.ISP) {
