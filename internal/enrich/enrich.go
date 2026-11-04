@@ -563,7 +563,9 @@ func decide(segs []geo.Segment, pr *probe, res provider.Result, override bool) (
 				up.City = &cv // 省变了市必须同步，否则留下跨省组合
 				k.prov++
 				k.city++
-			case !cityEmpty && res.City != "" && !sameName(sg.Geo.City, res.City):
+			case !cityEmpty && res.City != "" && res.Province != "" &&
+				sameName(sg.Geo.Province, res.Province) && !sameName(sg.Geo.City, res.City):
+				// 只换市：必须百度也给了省、且省与我们一致，否则无法验证归属
 				v := res.City
 				up.City = &v
 				k.city++
