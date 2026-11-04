@@ -1,0 +1,9 @@
+# 批处理必须 CRLF，否则 cmd 解析 if/括号块会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# shell 脚本必须 LF，否则 Linux / Git Bash 报 bad interpreter
+*.sh text eol=lf
+
+# Go 源码统一 LF
+*.go text eol=lf
