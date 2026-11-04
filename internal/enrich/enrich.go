@@ -45,6 +45,8 @@ type Options struct {
 	Override     bool   // 是否允许覆盖已有省市（默认 false，只补空）
 	ISPTables    *ispip.Table // 运营商网段表（nil=不按网段判 ISP）
 	GeoCN        *geocn.DB    // GeoCN 离线库（nil=不补区县）
+	ProbeStep    int          // 每多少 IP 布一个探测点（0 = 每段只探中点）
+	ProbeCap     int          // 每个段最多探几个点（0 = 不封顶）
 }
 
 // Stats 是执行统计。
@@ -55,6 +57,8 @@ type Stats struct {
 	CountyCleared  int // 因省市变更而清空的旧区县
 	GeoCNConflict  int // GeoCN 与现有省市不一致而放弃的段
 	Segments   int // 参与增强的段数（中国段）
+	Pieces     int // 按探测密度切出的片数
+	SplitSegs  int // 因片间结论不同而被切开的段数
 	Probes     int // 去重后的探测点数
 	DBHits     int // 命中 SQLite 缓存
 	Requests   int // 真实请求数
@@ -69,9 +73,17 @@ type Stats struct {
 }
 
 type probe struct {
-	key    uint32 // 去重键（ip & mask）
-	ip     uint32 // 实际探测 IP（段中点）
-	segIdx []int  // 该键对应的段下标
+	key   uint32    // 去重键（ip & mask）
+	ip    uint32    // 实际探测 IP
+	parts []segPart // 该键覆盖的段内区间
+}
+
+// segPart 是段内被某个探测点覆盖的一段区间。
+// 大段会被切成多片，每片独立探测、独立决策，结论不同就切开——
+// 这解决了"一个 /10 只探一个中点、结论套满 419 万 IP"的问题。
+type segPart struct {
+	idx        int    // 段下标
+	start, end uint32 // 该段内的区间
 }
 
 // Run 执行增强。ctx 取消会保存游标后返回。
@@ -105,7 +117,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		log.Printf("网段表定 ISP: 补空 %d 段, 纠正 %d 段", filled, fixed)
 	}
 
-	// 1. 组装 probe 列表（按 /24 去重）
+	// 1. 组装 probe 列表（按段长自适应切片，再按 /24 去重）
 	byKey := map[uint32]*probe{}
 	var probes []*probe
 	for i := range segs {
@@ -113,20 +125,27 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		if sg.Geo.Country != "中国" {
 			continue
 		}
-		ip := uint32((uint64(sg.Start) + uint64(sg.End)) / 2)
-		key := ip & opt.Mask
 		st.Segments++
-		pr, ok := byKey[key]
-		if !ok {
-			pr = &probe{key: key, ip: ip}
-			byKey[key] = pr
-			probes = append(probes, pr)
+		n := probeCount(opt, sg)
+		span := uint64(sg.End) - uint64(sg.Start) + 1
+		for j := 0; j < n; j++ {
+			a := sg.Start + uint32(span*uint64(j)/uint64(n))
+			b := sg.Start + uint32(span*uint64(j+1)/uint64(n)) - 1
+			ip := uint32((uint64(a) + uint64(b)) / 2)
+			key := ip & opt.Mask
+			pr, ok := byKey[key]
+			if !ok {
+				pr = &probe{key: key, ip: ip}
+				byKey[key] = pr
+				probes = append(probes, pr)
+			}
+			pr.parts = append(pr.parts, segPart{idx: i, start: a, end: b})
+			st.Pieces++
 		}
-		pr.segIdx = append(pr.segIdx, i)
 	}
 	st.Probes = len(probes)
-	log.Printf("待增强中国段 %d 个，去重后探测点 %d 个（并发 %d，限速 %d QPS）",
-		st.Segments, st.Probes, opt.Workers, opt.QPS)
+	log.Printf("待增强中国段 %d 个，按密度切出 %d 片，去重后探测点 %d 个（并发 %d，限速 %d QPS）",
+		st.Segments, st.Pieces, st.Probes, opt.Workers, opt.QPS)
 
 	// 2. 限速器
 	interval := time.Second / time.Duration(opt.QPS)
@@ -238,7 +257,10 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		}
 	}()
 
-	// 5. 消费 + 落库
+	// 5. 消费：每个探测点只作用于它覆盖的段内区间，按片累积到所属段
+	aggs := make([]*segAgg, len(segs))
+	var touched []int
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -256,21 +278,38 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 			}
 
 			if r.err == nil || provider.IsCacheable(r.err) {
-				ups, kinds, conf := decide(segs, r.pr, r.res, opt.Override)
-				st.ProvFixed += kinds.prov
-				st.CityFixed += kinds.city
-				st.CountyCleared += kinds.countyCleared
-				st.ISPFilled += kinds.isp
-				st.Conflicts += conf.n
-				if conf.sample != "" && len(conflicts) < opt.MaxConflicts {
-					confMu.Lock()
-					conflicts = append(conflicts, conf.sample)
-					confMu.Unlock()
-				}
-				if !opt.DryRun && len(ups) > 0 {
-					if err := db.UpdateSegments(ups); err != nil {
-						log.Printf("写库失败: %v", err)
+				for _, part := range r.pr.parts {
+					sg := &segs[part.idx]
+					ng, kinds, ispConf := decidePart(sg.Geo, r.res, opt.Override)
+
+					st.ProvFixed += kinds.prov
+					st.CityFixed += kinds.city
+					st.CountyCleared += kinds.countyCleared
+					st.ISPFilled += kinds.isp
+
+					// ISP 冲突只按段记一次，避免同一段多个片重复刷屏
+					if ispConf && part.start == sg.Start && len(conflicts) < opt.MaxConflicts {
+						st.Conflicts++
+						confMu.Lock()
+						conflicts = append(conflicts, fmt.Sprintf("%s\t%s|%s|%s\t%s|%s|%s\t%s",
+							geo.Uint2IP(sg.Start), sg.Geo.Province, sg.Geo.City, sg.Geo.ISP,
+							r.res.Province, r.res.City, r.res.ISP, r.res.Raw))
+						confMu.Unlock()
 					}
+
+					src := sg.Source
+					if ng != sg.Geo {
+						src = TagSource(src, "+baidu")
+					}
+					a := aggs[part.idx]
+					if a == nil {
+						a = &segAgg{}
+						aggs[part.idx] = a
+						touched = append(touched, part.idx)
+					}
+					a.pieces = append(a.pieces, geo.Segment{
+						Start: part.start, End: part.end, Geo: ng, Source: src,
+					})
 				}
 			}
 
@@ -287,12 +326,34 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	close(out)
 	<-done
 
+	// 5.5 落库：全段结论一致就 UPDATE，片间不一致就按片切开
+	if !opt.DryRun {
+		flushSegs(db, segs, aggs, touched, &st)
+	} else {
+		for _, idx := range touched {
+			if len(aggs[idx].pieces) > 1 {
+				st.SplitSegs++
+			}
+		}
+	}
+
 	// 6. GeoCN 补区县（放在百度之后：省市已是最终值，区县才能校验自洽）
 	if opt.GeoCN != nil {
+		// 上一步可能把段切开了，内存里的 segs 已过期。必须重新载入，否则
+		// GeoCN 会按已经不存在的 (start,end) 去 DELETE，导致段表重叠。
+		if !opt.DryRun {
+			reloaded, err := db.LoadSegments()
+			if err != nil {
+				return st, fmt.Errorf("重新载入段表: %w", err)
+			}
+			segs = reloaded
+		}
 		g := applyGeoCN(db, segs, opt.GeoCN, opt.DryRun)
 		st.CountyFilled, st.GeoCNConflict = g.county, g.conflict
-		log.Printf("GeoCN 补区县: %d 段（省市不一致放弃 %d 段，云段跳过 %d 段）",
-			g.county, g.conflict, g.cloud)
+		log.Printf("GeoCN 切分补区县: %d 段填区县，%d 段被切开（省 %d / 市 %d 段顺带补空）",
+			g.county, g.split, g.prov, g.city)
+		log.Printf("  片级放弃: 省市不一致 %d，跨度超限 %d，只有市级编码 %d，云段整段跳过 %d",
+			g.conflict, g.tooWide, g.noDistrict, g.cloud)
 	}
 
 	st.Elapsed = time.Since(start)
@@ -318,25 +379,31 @@ type confInfo struct {
 
 // geocnResult 是 GeoCN 预处理的统计。
 type geocnResult struct {
-	county, city, prov, conflict, cloud int
+	county, prov, city, conflict, cloud, split int
+	noDistrict                                  int
+	tooWide                                     int
 }
 
-// applyGeoCN 用 GeoCN 补区县。
+// maxDistrictSpan 是可信区县的最大跨度。
 //
-// 硬规则：
-//   - 只补空，绝不覆盖已有区县（qqwry 有的 36,493 段区县没有证据说 GeoCN 更准）
-//   - 省市必须自洽：GeoCN 的省/市与我们已有的值不一致就整条放弃，
+// GeoCN 库里存在 "59.192.0.0/10（419 万 IP）→ 110102 西城区" 这种条目，
+// 那是它扫描采样过稀造成的，不可能整段都是一个区。超过这个跨度的区县一律不采信，
+// 省市仍然保留（省市信息不受影响）。
+const maxDistrictSpan = 1 << 17 // 131072 个 IP
+
+// applyGeoCN 用 GeoCN 补区县，按 GeoCN 的网段边界切分段。
+//
+// 为什么必须切：一个 /16 平均跨 200 多个 GeoCN 网段，"整段塞一个区县"是错的。
+// 早先的实现只探段中点，于是 19,078 段（1.03 亿 IP）拿一个区县的标签套满整段。
+// 现在按 GeoCN 自己的网段边界切，每片填自己片的区县，不需要任何网络请求。
+//
+// 硬规则（与之前一致）：
+//   - 只补空，绝不覆盖已有区县（qqwry 的区县无证据说更差）
+//   - 省市必须自洽：GeoCN 的省/市与我们已有的值不一致，那一片就不填区县，
 //     否则会产出"吉林省长春市|玄武区"这种错位数据
-//   - 云/CDN/IDC 段跳过：GeoCN 也是扫描 API 得来的，云段给的是 PoP 城市
+//   - 云/CDN/IDC 段跳过：GeoCN 同样是扫 API 得来的，云段给的是 PoP 城市
 func applyGeoCN(db *store.DB, segs []geo.Segment, gc *geocn.DB, dryRun bool) geocnResult {
 	var res geocnResult
-	var batch []store.SegmentUpdate
-	flush := func() {
-		if !dryRun && len(batch) > 0 {
-			_ = db.UpdateSegments(batch)
-		}
-		batch = batch[:0]
-	}
 
 	for i := range segs {
 		sg := &segs[i]
@@ -347,45 +414,145 @@ func applyGeoCN(db *store.DB, segs []geo.Segment, gc *geocn.DB, dryRun bool) geo
 			res.cloud++
 			continue
 		}
-		mid := uint32((uint64(sg.Start) + uint64(sg.End)) / 2)
-		info, ok := gc.Lookup(mid)
-		if !ok || !info.HasDistrict() {
-			continue
-		}
-		if sg.Geo.Province != "" && !sameName(sg.Geo.Province, info.Province) {
-			res.conflict++
-			continue
-		}
-		if sg.Geo.City != "" && info.City != "" && !sameName(sg.Geo.City, info.City) {
-			res.conflict++
+		slices := gc.Spans(sg.Start, sg.End)
+		if len(slices) == 0 {
 			continue
 		}
 
-		up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+geocn")}
-		if sg.Geo.Province == "" && info.Province != "" {
-			v := info.Province
-			up.Province = &v
-			sg.Geo.Province = v
-			res.prov++
+		runs := buildRuns(sg, slices, &res)
+		if len(runs) == 0 {
+			continue
 		}
-		if sg.Geo.City == "" && info.City != "" {
-			v := info.City
-			up.City = &v
-			sg.Geo.City = v
-			res.city++
-		}
-		v := info.District
-		up.County = &v
-		sg.Geo.County = v
-		res.county++
 
-		batch = append(batch, up)
-		if len(batch) >= 5000 {
-			flush()
+		// 全段一个结论：直接 UPDATE，不用切
+		if len(runs) == 1 && runs[0].start == sg.Start && runs[0].end == sg.End {
+			r := runs[0]
+			if r.county == "" {
+				continue
+			}
+			up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+geocn")}
+			if sg.Geo.Province == "" && r.prov != "" {
+				v := r.prov
+				up.Province = &v
+				res.prov++
+			}
+			if sg.Geo.City == "" && r.city != "" {
+				v := r.city
+				up.City = &v
+				res.city++
+			}
+			v := r.county
+			up.County = &v
+			res.county++
+
+			if !dryRun {
+				if err := db.UpdateSegments([]store.SegmentUpdate{up}); err != nil {
+					log.Printf("GeoCN 写库失败 %s: %v", geo.Uint2IP(sg.Start), err)
+				}
+			}
+			sg.Geo.County = r.county
+			continue
+		}
+
+		// 跨多个区县：按边界切片，每片带自己的区县
+		pieces := make([]geo.Segment, 0, len(runs))
+		any := false
+		for _, r := range runs {
+			g := sg.Geo
+			if r.prov != "" {
+				g.Province = r.prov
+			}
+			if r.city != "" {
+				g.City = r.city
+			}
+			if r.county != "" {
+				g.County = r.county
+				res.county++
+				any = true
+			}
+			src := sg.Source
+			if r.county != "" {
+				src = TagSource(src, "+geocn")
+			}
+			pieces = append(pieces, geo.Segment{Start: r.start, End: r.end, Geo: g, Source: src})
+		}
+		if !any {
+			// 一片区县都没填上，切了也没意义
+			continue
+		}
+		res.split++
+		if !dryRun {
+			if err := db.ReplaceSegment(sg.Start, sg.End, pieces); err != nil {
+				log.Printf("GeoCN 切分段失败 %s: %v", geo.Uint2IP(sg.Start), err)
+			}
 		}
 	}
-	flush()
 	return res
+}
+
+// run 是段内一段归属一致的区间。
+type run struct {
+	start, end         uint32
+	prov, city, county string
+}
+
+// buildRuns 把 GeoCN 的网段切片合并成"归属相同"的连续区间。
+//
+// 必须补齐首尾和中间的空洞（GeoCN 未收录的 IP），否则切分后段表会出现缝隙、
+// 丢掉那部分 IP —— 之前只补了中间空洞，漏了首尾。
+func buildRuns(sg *geo.Segment, slices []geocn.Slice, res *geocnResult) []run {
+	cur := sg.Geo
+	var runs []run
+	push := func(r run) {
+		if n := len(runs); n > 0 && runs[n-1].county == r.county &&
+			runs[n-1].prov == r.prov && runs[n-1].city == r.city &&
+			runs[n-1].end+1 == r.start {
+			runs[n-1].end = r.end
+			return
+		}
+		runs = append(runs, r)
+	}
+
+	for _, sl := range slices {
+		// 空洞：GeoCN 没收录的区间，保持原归属（首尾空洞同样要补）
+		prev := sg.Start
+		if n := len(runs); n > 0 {
+			prev = runs[n-1].end + 1
+		}
+		if prev < sl.Start {
+			push(run{start: prev, end: sl.Start - 1})
+		}
+		info := sl.Info
+		var r run
+		r.start, r.end = sl.Start, sl.End
+		switch {
+		case !info.HasDistrict():
+			res.noDistrict++
+		case sl.End-sl.Start+1 > maxDistrictSpan:
+			res.tooWide++
+		case !geoConsistent(cur, info):
+			res.conflict++
+		default:
+			r.prov, r.city, r.county = info.Province, info.City, info.District
+		}
+		push(r)
+	}
+	// 尾部空洞
+	if n := len(runs); n > 0 && runs[n-1].end < sg.End {
+		push(run{start: runs[n-1].end + 1, end: sg.End})
+	}
+	return runs
+}
+
+// geoConsistent 判断 GeoCN 的省市与我们已有的值是否对得上（空值不参与比较）。
+func geoConsistent(cur geo.GeoInfo, in geocn.Info) bool {
+	if cur.Province != "" && !sameName(cur.Province, in.Province) {
+		return false
+	}
+	if cur.City != "" && !sameName(cur.City, in.City) {
+		return false
+	}
+	return true
 }
 
 // applyISPTables 用运营商网段表设置 ISP。
@@ -479,16 +646,11 @@ func trimAdminSuffix(s string) string {
 
 // clearCounty 在省市被改写后清空不再成立的区县/镇。
 // 稍后 GeoCN 会按新的省市重新补，所以这里只是把错的先去掉。
-func clearCounty(sg *geo.Segment, up *store.SegmentUpdate, k *kindCount) {
-	empty := ""
-	if sg.Geo.County != "" {
-		up.County = &empty
+func clearCounty(g *geo.GeoInfo, k *kindCount) {
+	if g.County != "" {
 		k.countyCleared++
 	}
-	if sg.Geo.Town != "" {
-		up.Town = &empty
-	}
-	sg.Geo.County, sg.Geo.Town = "", ""
+	g.County, g.Town = "", ""
 }
 
 // FillPair 按"省/市必须自洽"的原则补空，返回实际填了省、填了市。
@@ -529,96 +691,179 @@ func FillPair(g *geo.GeoInfo, res provider.Result) (provSet, citySet bool) {
 	return
 }
 
-// fillPair 把 FillPair 的结果记到待写库的更新上。
-func fillPair(g *geo.GeoInfo, res provider.Result, up *store.SegmentUpdate, k *kindCount) {
+// fillPair 补空并计数。
+func fillPair(g *geo.GeoInfo, res provider.Result, k *kindCount) {
 	provSet, citySet := FillPair(g, res)
 	if provSet {
-		v := g.Province
-		up.Province = &v
 		k.prov++
 	}
 	if citySet {
-		v := g.City
-		up.City = &v
 		k.city++
 	}
 }
 
-// decide 决定某个探测点的结果如何应用到其所有段上。
+// decidePart 针对一个段内区间做决策，返回决策后的归属。
 //
 // 三种动作，优先级从高到低：
 //  1. 补空：省/市/ISP 为空就填 —— 永远做，云段也做（这是 enrich 的主要价值）
 //  2. 覆盖省市：仅 override=true 且非云段；百度说换省却给不出市 → 低置信度不动
 //  3. ISP 冲突：两边都有值但不同 → 只记录不写库（qqwry 的"腾讯云/网宿"更细）
-func decide(segs []geo.Segment, pr *probe, res provider.Result, override bool) ([]store.SegmentUpdate, kindCount, confInfo) {
+func decidePart(base geo.GeoInfo, res provider.Result, override bool) (geo.GeoInfo, kindCount, bool) {
 	var (
-		ups  []store.SegmentUpdate
-		k    kindCount
-		conf confInfo
+		k         kindCount
+		ispConflict bool
 	)
+	out := base
 	if res.Province == "" && res.City == "" && res.ISP == "" {
-		return nil, k, conf
+		return out, k, false
 	}
 
-	for _, idx := range pr.segIdx {
-		sg := &segs[idx]
-		up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+baidu")}
+	provEmpty := out.Province == ""
+	cityEmpty := out.City == ""
 
-		provEmpty := sg.Geo.Province == ""
-		cityEmpty := sg.Geo.City == ""
+	// 1. 补空（省市必须成对自洽，否则会产出"江西省|广州市"这种错位组合）
+	fillPair(&out, res, &k)
 
-		// 1. 补空（省市必须成对自洽，否则会产出"江西省|广州市"这种错位组合）
-		fillPair(&sg.Geo, res, &up, &k)
-
-		// 2. 覆盖（云/CDN 段禁止覆盖：地理位置由路由决定，探到的是 PoP 城市）
-		if override && !regions.IsCloudISP(sg.Geo.ISP) {
-			switch {
-			case !provEmpty && res.Province != "" && !sameName(sg.Geo.Province, res.Province):
-				if sg.Geo.City != "" && res.City == "" {
-					break // 低置信度：说换省却给不出市，整条不动
-				}
-				pv, cv := res.Province, res.City
-				up.Province = &pv
-				up.City = &cv // 省变了市必须同步，否则留下跨省组合
-				k.prov++
-				k.city++
-				// 市变了，挂在旧市下的区县/镇不再成立，清掉（稍后由 GeoCN 按新省市重填）
-				if sg.Geo.City != "" && !sameName(sg.Geo.City, res.City) {
-					clearCounty(sg, &up, &k)
-				}
-				sg.Geo.Province, sg.Geo.City = pv, cv
-			case !cityEmpty && res.City != "" && res.Province != "" &&
-				sameName(sg.Geo.Province, res.Province) && !sameName(sg.Geo.City, res.City):
-				// 只换市：必须百度也给了省、且省与我们一致，否则无法验证归属
-				v := res.City
-				up.City = &v
-				k.city++
-				clearCounty(sg, &up, &k)
-				sg.Geo.City = v
+	// 2. 覆盖（云/CDN 段禁止覆盖：地理位置由路由决定，探到的是 PoP 城市）
+	if override && !regions.IsCloudISP(out.ISP) {
+		switch {
+		case !provEmpty && res.Province != "" && !sameName(out.Province, res.Province):
+			if out.City != "" && res.City == "" {
+				break // 低置信度：说换省却给不出市，整条不动
 			}
-		}
-
-		// 3. ISP：只补空，冲突只记录
-		if sg.Geo.ISP == "" && res.ISP != "" {
-			v := res.ISP
-			up.ISP = &v
-			k.isp++
-		} else if sg.Geo.ISP != "" && res.ISP != "" && sg.Geo.ISP != res.ISP {
-			conf.n++
-			if conf.sample == "" {
-				conf.sample = fmt.Sprintf("%s\t%s|%s|%s\t%s|%s|%s\t%s",
-					geo.Uint2IP(sg.Start), sg.Geo.Province, sg.Geo.City, sg.Geo.ISP,
-					res.Province, res.City, res.ISP, res.Raw)
+			oldCity := out.City
+			out.Province = res.Province
+			out.City = res.City // 省变了市必须同步，否则留下跨省组合
+			k.prov++
+			k.city++
+			// 市变了，挂在旧市下的区县/镇不再成立，清掉（稍后由 GeoCN 按新省市重填）
+			if oldCity != "" && !sameName(oldCity, res.City) {
+				clearCounty(&out, &k)
 			}
-		}
-
-		if up.Province != nil || up.City != nil || up.ISP != nil {
-			ups = append(ups, up)
+		case !cityEmpty && res.City != "" && res.Province != "" &&
+			sameName(out.Province, res.Province) && !sameName(out.City, res.City):
+			// 只换市：必须百度也给了省、且省与我们一致，否则无法验证归属
+			out.City = res.City
+			k.city++
+			clearCounty(&out, &k)
 		}
 	}
-	return ups, k, conf
+
+	// 3. ISP：只补空，冲突只记录
+	if out.ISP == "" && res.ISP != "" {
+		out.ISP = res.ISP
+		k.isp++
+	} else if out.ISP != "" && res.ISP != "" && out.ISP != res.ISP {
+		ispConflict = true
+	}
+	return out, k, ispConflict
 }
 
+
+// segAgg 累积一个段的所有片。
+type segAgg struct {
+	pieces []geo.Segment
+}
+
+// probeCount 决定一个段要布几个探测点。
+//
+// 只探一个中点会把一个城市的结论套到整段上：一个 /10（419 万 IP）只探一个点，
+// 误差比任何数据源的问题都大。所以按段长阶梯加密：
+//
+//	≤ ProbeStep        → 1 个点
+//	每 ProbeStep 一个点，封顶 ProbeCap 个
+//
+// 探测点还会按 /24 去重，同一个 /24 内的多片共用一次请求。
+func probeCount(opt Options, sg *geo.Segment) int {
+	if opt.ProbeStep <= 0 {
+		return 1
+	}
+	span := uint64(sg.End) - uint64(sg.Start) + 1
+	n := int((span + uint64(opt.ProbeStep) - 1) / uint64(opt.ProbeStep))
+	if n < 1 {
+		n = 1
+	}
+	if opt.ProbeCap > 0 && n > opt.ProbeCap {
+		n = opt.ProbeCap
+	}
+	return n
+}
+
+// flushSegs 把累积的片写回库。
+//
+// 全段一个结论 → 一条 UPDATE（快且不改变段结构）；
+// 片间结论不同 → ReplaceSegment 整段替换成多片（单事务删+插，保持连续不重不漏）。
+func flushSegs(db *store.DB, segs []geo.Segment, aggs []*segAgg, touched []int, st *Stats) {
+	var ups []store.SegmentUpdate
+	for _, idx := range touched {
+		sg := segs[idx]
+		a := aggs[idx]
+		if len(a.pieces) == 0 {
+			continue
+		}
+		if len(a.pieces) == 1 {
+			p := a.pieces[0]
+			if p.Start != sg.Start || p.End != sg.End || p.Geo == sg.Geo {
+				continue
+			}
+			ups = append(ups, diffUpdate(sg, p))
+			if len(ups) >= 2000 {
+				if err := db.UpdateSegments(ups); err != nil {
+					log.Printf("写库失败: %v", err)
+				}
+				ups = ups[:0]
+			}
+			continue
+		}
+
+		// 多片：先看有没有结论变化，没变化就别白白切段
+		changed := false
+		for _, p := range a.pieces {
+			if p.Geo != sg.Geo {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			continue
+		}
+		st.SplitSegs++
+		if err := db.ReplaceSegment(sg.Start, sg.End, a.pieces); err != nil {
+			log.Printf("切分段失败 %s: %v", geo.Uint2IP(sg.Start), err)
+		}
+	}
+	if len(ups) > 0 {
+		if err := db.UpdateSegments(ups); err != nil {
+			log.Printf("写库失败: %v", err)
+		}
+	}
+}
+
+// diffUpdate 只把变化的列写进 UPDATE，避免无谓覆盖。
+func diffUpdate(old geo.Segment, p geo.Segment) store.SegmentUpdate {
+	up := store.SegmentUpdate{Start: old.Start, Source: p.Source}
+	if p.Geo.Province != old.Geo.Province {
+		v := p.Geo.Province
+		up.Province = &v
+	}
+	if p.Geo.City != old.Geo.City {
+		v := p.Geo.City
+		up.City = &v
+	}
+	if p.Geo.County != old.Geo.County {
+		v := p.Geo.County
+		up.County = &v
+	}
+	if p.Geo.Town != old.Geo.Town {
+		v := p.Geo.Town
+		up.Town = &v
+	}
+	if p.Geo.ISP != old.Geo.ISP {
+		v := p.Geo.ISP
+		up.ISP = &v
+	}
+	return up
+}
 
 // writeConflicts 输出冲突样例（TSV，便于人工抽检）。
 func writeConflicts(path string, lines []string) error {

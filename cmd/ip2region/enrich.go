@@ -32,6 +32,8 @@ func runEnrich(args []string) error {
 	override := fs.Bool("override", true, "用百度覆盖已有省市（默认开启，传 -override=false 关掉）")
 	ispDir := fs.String("ispip", "data/ispip", "运营商网段表目录（空串=不用）")
 	geocnPath := fs.String("geocn", "data/geocn/GeoCN.mmdb", "GeoCN 离线库路径（空串=不补区县）")
+	probeStep := fs.Int("probe-step", 2048, "每多少 IP 布一个探测点（0=每段只探中点）")
+	probeCap := fs.Int("probe-cap", 64, "每个段最多几个探测点（0=不封顶）")
 	_ = fs.Parse(args)
 
 	m, err := parseMask(*mask)
@@ -77,7 +79,12 @@ func runEnrich(args []string) error {
 				return err
 			}
 			defer gcn.Close()
-			log.Printf("GeoCN 离线库已加载（行政区划编码 %d 条）", gcn.CodeCount())
+			tIdx := time.Now()
+			if err := gcn.BuildIndex(); err != nil {
+				return fmt.Errorf("构建 GeoCN 区间索引: %w", err)
+			}
+			log.Printf("GeoCN 离线库已加载（编码 %d 条，区间索引 %d 条，%s）",
+				gcn.CodeCount(), gcn.SpanCount(), time.Since(tIdx).Round(time.Millisecond))
 		} else {
 			log.Printf("GeoCN 库 %s 不存在，跳过补区县", *geocnPath)
 		}
@@ -103,10 +110,13 @@ func runEnrich(args []string) error {
 		Override:     *override,
 		ISPTables:    ispTables,
 		GeoCN:        gcn,
+		ProbeStep:    *probeStep,
+		ProbeCap:     *probeCap,
 	})
 
 	fmt.Println("---- enrich 统计 ----")
 	fmt.Printf("中国段              : %d\n", st.Segments)
+	fmt.Printf("切出片数            : %d（新增 %d 段）\n", st.Pieces, st.SplitSegs)
 	fmt.Printf("去重探测点          : %d\n", st.Probes)
 	fmt.Printf("缓存命中(免请求)    : %d\n", st.DBHits)
 	fmt.Printf("真实请求            : %d\n", st.Requests)
