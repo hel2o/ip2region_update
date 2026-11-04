@@ -278,6 +278,9 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 			}
 
 			if r.err == nil || provider.IsCacheable(r.err) {
+				// 百度只返回"中国 移动"这类（没有省市）——记下来，
+				// GeoCN 阶段据此决定要不要用自己的省市覆盖 qqwry
+				noGeo := r.res.Province == "" && r.res.City == ""
 				for _, part := range r.pr.parts {
 					sg := &segs[part.idx]
 					ng, kinds, ispConf := decidePart(sg.Geo, r.res, opt.Override)
@@ -300,6 +303,9 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 					src := sg.Source
 					if ng != sg.Geo {
 						src = TagSource(src, "+baidu")
+					}
+					if noGeo {
+						src = TagSource(src, baiduNoGeo)
 					}
 					a := aggs[part.idx]
 					if a == nil {
@@ -354,6 +360,9 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 			g.county, g.split, g.prov, g.city)
 		log.Printf("  片级放弃: 省市不一致 %d，跨度超限 %d，只有市级编码 %d，云段整段跳过 %d",
 			g.conflict, g.tooWide, g.noDistrict, g.cloud)
+		if g.overridden > 0 {
+			log.Printf("  百度无省市、改用 GeoCN 判断: %d 片", g.overridden)
+		}
 	}
 
 	st.Elapsed = time.Since(start)
@@ -382,7 +391,13 @@ type geocnResult struct {
 	county, prov, city, conflict, cloud, split int
 	noDistrict                                  int
 	tooWide                                     int
+	overridden                                  int // 百度没给省市，改用 GeoCN 的
 }
+
+// baiduNoGeo 是"百度没给出省市"的来源标记。
+// 打了这个标记的段，说明百度只回了"中国 移动"这类，qqwry 的省市是唯一来源、
+// 没有独立证据，此时允许 GeoCN 覆盖。
+const baiduNoGeo = "+baidu-none"
 
 // maxDistrictSpan 是可信区县的最大跨度。
 //
@@ -419,7 +434,11 @@ func applyGeoCN(db *store.DB, segs []geo.Segment, gc *geocn.DB, dryRun bool) geo
 			continue
 		}
 
-		runs := buildRuns(sg, slices, &res)
+		// 百度对这段完全没给省市（只返回"中国 移动"这类）时，qqwry 的值没有任何
+		// 独立证据支撑，而 GeoCN 有明确判断——此时允许 GeoCN 覆盖省市。
+		// 否则会出现 111.55.211.0/19（11520 个 IP，实为广东/重庆）整段标"山西省"。
+		allowOverride := strings.Contains(sg.Source, baiduNoGeo)
+		runs := buildRuns(sg, slices, &res, allowOverride)
 		if len(runs) == 0 {
 			continue
 		}
@@ -427,30 +446,51 @@ func applyGeoCN(db *store.DB, segs []geo.Segment, gc *geocn.DB, dryRun bool) geo
 		// 全段一个结论：直接 UPDATE，不用切
 		if len(runs) == 1 && runs[0].start == sg.Start && runs[0].end == sg.End {
 			r := runs[0]
-			if r.county == "" {
+			up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+geocn")}
+			changed := false
+
+			if allowOverride && r.prov != "" {
+				// 百度没给省市：省和市成对换成 GeoCN 的，避免"新疆|甘孜州"这种错位
+				if !sameName(r.prov, sg.Geo.Province) || !sameName(r.city, sg.Geo.City) {
+					pv, cv := r.prov, r.city
+					up.Province, up.City = &pv, &cv
+					sg.Geo.Province, sg.Geo.City = pv, cv
+					res.prov++
+					res.city++
+					changed = true
+				}
+			} else {
+				if sg.Geo.Province == "" && r.prov != "" {
+					v := r.prov
+					up.Province = &v
+					sg.Geo.Province = v
+					res.prov++
+					changed = true
+				}
+				if sg.Geo.City == "" && r.city != "" {
+					v := r.city
+					up.City = &v
+					sg.Geo.City = v
+					res.city++
+					changed = true
+				}
+			}
+
+			if r.county != "" {
+				v := r.county
+				up.County = &v
+				sg.Geo.County = v
+				res.county++
+				changed = true
+			}
+			if !changed {
 				continue
 			}
-			up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+geocn")}
-			if sg.Geo.Province == "" && r.prov != "" {
-				v := r.prov
-				up.Province = &v
-				res.prov++
-			}
-			if sg.Geo.City == "" && r.city != "" {
-				v := r.city
-				up.City = &v
-				res.city++
-			}
-			v := r.county
-			up.County = &v
-			res.county++
-
 			if !dryRun {
 				if err := db.UpdateSegments([]store.SegmentUpdate{up}); err != nil {
 					log.Printf("GeoCN 写库失败 %s: %v", geo.Uint2IP(sg.Start), err)
 				}
 			}
-			sg.Geo.County = r.county
 			continue
 		}
 
@@ -500,7 +540,7 @@ type run struct {
 //
 // 必须补齐首尾和中间的空洞（GeoCN 未收录的 IP），否则切分后段表会出现缝隙、
 // 丢掉那部分 IP —— 之前只补了中间空洞，漏了首尾。
-func buildRuns(sg *geo.Segment, slices []geocn.Slice, res *geocnResult) []run {
+func buildRuns(sg *geo.Segment, slices []geocn.Slice, res *geocnResult, allowOverride bool) []run {
 	cur := sg.Geo
 	var runs []run
 	push := func(r run) {
@@ -525,10 +565,20 @@ func buildRuns(sg *geo.Segment, slices []geocn.Slice, res *geocnResult) []run {
 		info := sl.Info
 		var r run
 		r.start, r.end = sl.Start, sl.End
+		hasDist := info.HasDistrict()
+		tooWide := sl.End-sl.Start+1 > maxDistrictSpan
+
 		switch {
-		case !info.HasDistrict():
+		case allowOverride:
+			// 百度没给省市：采信 GeoCN 的省市（区县能填就一起填）
+			r.prov, r.city = info.Province, info.City
+			if hasDist && !tooWide {
+				r.county = info.District
+			}
+			res.overridden++
+		case !hasDist:
 			res.noDistrict++
-		case sl.End-sl.Start+1 > maxDistrictSpan:
+		case tooWide:
 			res.tooWide++
 		case !geoConsistent(cur, info):
 			res.conflict++
@@ -807,7 +857,11 @@ func flushSegs(db *store.DB, segs []geo.Segment, aggs []*segAgg, touched []int, 
 		}
 		if len(a.pieces) == 1 {
 			p := a.pieces[0]
-			if p.Start != sg.Start || p.End != sg.End || p.Geo == sg.Geo {
+			if p.Start != sg.Start || p.End != sg.End {
+				continue
+			}
+			// 归属没变但 source 变了（比如打上 +baidu-none）也要写回去
+			if p.Geo == sg.Geo && p.Source == sg.Source {
 				continue
 			}
 			ups = append(ups, diffUpdate(sg, p))
@@ -820,7 +874,7 @@ func flushSegs(db *store.DB, segs []geo.Segment, aggs []*segAgg, touched []int, 
 			continue
 		}
 
-		// 多片：先看有没有结论变化，没变化就别白白切段
+		// 多片：先看归属有没有变化，没变化就别白白切段
 		changed := false
 		for _, p := range a.pieces {
 			if p.Geo != sg.Geo {
@@ -829,6 +883,11 @@ func flushSegs(db *store.DB, segs []geo.Segment, aggs []*segAgg, touched []int, 
 			}
 		}
 		if !changed {
+			// 归属没变，但 source 可能变了（打上 +baidu-none 标记），
+			// 这个标记 GeoCN 阶段要用，必须写回去
+			if a.pieces[0].Source != sg.Source {
+				ups = append(ups, store.SegmentUpdate{Start: sg.Start, Source: a.pieces[0].Source})
+			}
 			continue
 		}
 		st.SplitSegs++
