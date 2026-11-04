@@ -45,6 +45,7 @@ type Options struct {
 	Override     bool   // 是否允许覆盖已有省市（默认 false，只补空）
 	ISPTables    *ispip.Table // 运营商网段表（nil=不按网段判 ISP）
 	GeoCN        *geocn.DB    // GeoCN 离线库（nil=不补区县）
+	Fallback     provider.Provider // 备用源（高德）：只在主源没给省市时用
 	ProbeStep    int          // 每多少 IP 布一个探测点（0 = 每段只探中点）
 	ProbeCap     int          // 每个段最多探几个点（0 = 不封顶）
 }
@@ -196,10 +197,12 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 
 				// 先查 DB 缓存（同 /24 任一条即可）
 				if cached, ok, err := db.GetCacheInRange(pr.key, pr.key|^opt.Mask, p.Name()); err == nil && ok {
-					out <- probeResult{pr: pr, res: provider.Result{
+					res := provider.Result{
 						Province: cached.Province, City: cached.City,
 						County: cached.District, ISP: cached.ISP, Raw: cached.Raw,
-					}, hit: true}
+					}
+					res = fillFromFallback(stopCtx, db, opt, pr, res, tokens, &reqCount)
+					out <- probeResult{pr: pr, res: res, hit: true}
 					continue
 				}
 
@@ -216,6 +219,9 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 				atomic.AddInt64(&reqCount, 1)
 
 				res, err := p.Lookup(stopCtx, pr.ip)
+				if err == nil {
+					res = fillFromFallback(stopCtx, db, opt, pr, res, tokens, &reqCount)
+				}
 				if errors.Is(err, provider.ErrBlocked) {
 					ctxStop.Store(true)
 					cancel()
@@ -813,6 +819,58 @@ func decidePart(base geo.GeoInfo, res provider.Result, override bool) (geo.GeoIn
 	return out, k, ispConflict
 }
 
+
+// fillFromFallback 在主数据源没给出省市时，用备用源补一次。
+//
+// 为什么需要：百度 opendata 接口对部分大运营商段只返回"中国 移动"（没有省市），
+// 这些段 qqwry 的值往往整片错（实测 111.55.0.0/16 被判成"山西省"，实为广东/重庆）。
+//
+// 为什么只用备用源补缺口：高德有月度配额（个人 15 万次/月），全量 25 万探测点
+// 一次就超；只查缺口约 1.9 万次/次重建，完全在免费额度内。
+func fillFromFallback(ctx context.Context, db *store.DB, opt Options, pr *probe,
+	res provider.Result, tokens chan struct{}, reqCount *int64) provider.Result {
+	fb := opt.Fallback
+	if fb == nil || res.Province != "" || res.City != "" {
+		return res
+	}
+
+	// 备用源也走缓存，避免重跑重复烧配额
+	lo, hi := pr.key, pr.key|^opt.Mask
+	if c, ok, err := db.GetCacheInRange(lo, hi, fb.Name()); err == nil && ok {
+		res.Province, res.City = c.Province, c.City
+		res.Raw = res.Raw + " →" + fb.Name() + ":" + c.Raw
+		return res
+	}
+
+	select {
+	case <-ctx.Done():
+		return res
+	case <-tokens:
+	}
+	if opt.Limit > 0 && atomic.LoadInt64(reqCount) >= int64(opt.Limit) {
+		return res
+	}
+	atomic.AddInt64(reqCount, 1)
+
+	fr, err := fb.Lookup(ctx, pr.ip)
+	if err != nil {
+		// 失败不缓存，下次重试
+		return res
+	}
+	// 空结果也缓存：没数据的 IP 重跑时不该再烧一次配额
+	_ = db.PutCache(store.CachedResult{
+		IP: pr.ip, Provider: fb.Name(), Province: fr.Province, City: fr.City,
+		Raw: fr.Raw, FetchedAt: time.Now().Unix(),
+	})
+	if fr.Province != "" || fr.City != "" {
+		res.Province, res.City = fr.Province, fr.City
+		if res.Country == "" {
+			res.Country = "中国"
+		}
+	}
+	res.Raw = res.Raw + " →" + fb.Name() + ":" + fr.Raw
+	return res
+}
 
 // segAgg 累积一个段的所有片。
 type segAgg struct {

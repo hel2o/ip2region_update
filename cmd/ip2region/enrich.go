@@ -32,6 +32,7 @@ func runEnrich(args []string) error {
 	override := fs.Bool("override", true, "用百度覆盖已有省市（默认开启，传 -override=false 关掉）")
 	ispDir := fs.String("ispip", "data/ispip", "运营商网段表目录（空串=不用）")
 	geocnPath := fs.String("geocn", "data/geocn/GeoCN.mmdb", "GeoCN 离线库路径（空串=不补区县）")
+	amapKey := fs.String("amap-key", os.Getenv("AMAP_KEY"), "高德 Web 服务 Key（只用于补百度缺失的省市，留空则不启用）")
 	probeStep := fs.Int("probe-step", 2048, "每多少 IP 布一个探测点（0=每段只探中点）")
 	probeCap := fs.Int("probe-cap", 64, "每个段最多几个探测点（0=不封顶）")
 	_ = fs.Parse(args)
@@ -91,6 +92,12 @@ func runEnrich(args []string) error {
 	}
 
 	p := provider.NewBaidu(*timeout)
+
+	var fb provider.Provider
+	if a := provider.NewAmap(*amapKey, *timeout); a != nil {
+		fb = a
+		log.Printf("备用源已启用: 高德 IP 定位（仅在百度没给省市时调用，注意月度配额）")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -110,6 +117,7 @@ func runEnrich(args []string) error {
 		Override:     *override,
 		ISPTables:    ispTables,
 		GeoCN:        gcn,
+		Fallback:     fb,
 		ProbeStep:    *probeStep,
 		ProbeCap:     *probeCap,
 	})
