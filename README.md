@@ -350,7 +350,7 @@ cd ip2region_update
 rm -f ip2region_*.xdb                                # 只保留最新一份
 cp ../build/ip2region.xdb ./ip2region_<数据版本>.xdb   # 用 fetch 打印的版本号，不是当天日期
 # 更新 README.md 里的版本号 / 文件大小 / 覆盖率
-git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin master
+git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 ```
 
 ### 两条硬要求
