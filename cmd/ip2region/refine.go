@@ -22,7 +22,9 @@ func runRefine(args []string) error {
 	fs := newFlagSet("refine", "对大段做二分收敛细分（enrich 之后执行）")
 	dbPath := fs.String("db", "data/ip2region.db", "SQLite 路径")
 	threshold := fs.Int("threshold", 4096, "只处理长度 >= 该值的段（4096 = /20）")
-	depth := fs.Int("depth", 2, "二分递归深度上限（2 表示最多切 4 片）")
+	minSpan := fs.Int("min-span", 256, "收敛粒度，到这个 IP 数就停（256 = /24）")
+	depth := fs.Int("depth", 20, "递归深度安全阀（正常不会触发）")
+	segProbes := fs.Int("seg-probes", 128, "单个段最多探测几次，防止复杂段烧请求")
 	qps := fs.Int("qps", 20, "全局请求速率上限")
 	workers := fs.Int("workers", 4, "并发段数")
 	limit := fs.Int("limit", 0, "最多请求数（0=不限）")
@@ -57,7 +59,9 @@ func runRefine(args []string) error {
 
 	st, err := refine.Run(ctx, db, p, segs, refine.Options{
 		Threshold:  *threshold,
+		MinSpan:    *minSpan,
 		MaxDepth:   *depth,
+		SegProbes:  *segProbes,
 		QPS:        *qps,
 		Workers:    *workers,
 		Limit:      *limit,

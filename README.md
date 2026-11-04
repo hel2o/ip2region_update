@@ -24,7 +24,7 @@ $ ip2region look --xdb build/ip2region.xdb 183.3.149.185
   - [fetch：下载最新数据](#fetch下载最新数据)
   - [parse：解析成段表](#parse解析成段表)
   - [enrich：百度补空](#enrich百度补空)
-  - [refine：大段细分](#refine大段细分)
+  - [refine：边界递归收敛](#refine边界递归收敛)
   - [merge：叠加自定义覆盖](#merge叠加自定义覆盖)
   - [build：生成-xdb](#build生成-xdb)
   - [verify：校验与对拍](#verify校验与对拍)
@@ -69,8 +69,8 @@ go run ./cmd/ip2region stats
 ```bash
 go run ./cmd/ip2region fetch          # 下载 qqwry.dat（约 27MB）
 go run ./cmd/ip2region parse          # 解析 → 141 万段，约 10 秒
-go run ./cmd/ip2region enrich -qps 60 # 百度补空，11.4 万次请求
-go run ./cmd/ip2region refine -qps 60 # 大段细分
+go run ./cmd/ip2region enrich -qps 60 # 百度判省市 + 补空，25 万探测点
+go run ./cmd/ip2region refine -qps 60 # 边界递归收敛到 /24
 go run ./cmd/ip2region merge          # 叠加 data/custom/*.txt
 go run ./cmd/ip2region build -from txt
 go run ./cmd/ip2region verify -n 50000
@@ -100,7 +100,7 @@ go build ./cmd/ip2region    # 也可以编译成单二进制
 | `fetch` | 下载 `qqwry.dat` + 网段表 + GeoCN | `data/qqwry.dat`、`data/ispip/`、`data/geocn/` | 40 秒 |
 | `parse` | 解析 dat，拆省市区镇，落 SQLite | `data/ip2region.db` | 10 秒 |
 | `enrich` | 调百度补省市/ISP | 改写段表 + `ip_cache` | 首次 30 分钟，缓存后 25 秒 |
-| `refine` | 大段二分收敛细分 | 段表拆分 | 首次 13 分钟，缓存后 14 秒 |
+| `refine` | 大段边界递归收敛到 /24 | 段表拆分 | 首次约 20 秒（多为缓存命中） |
 | `merge` | 叠加 `data/custom/*.txt` | `build/ip2region.txt` | 1 秒 |
 | `build` | 调官方 maker 生成 xdb | `build/ip2region.xdb` | 9 秒 |
 | `verify` | 校验全覆盖 + 与旧库对拍 | 控制台报告 | 5 秒 |
@@ -119,7 +119,7 @@ data/qqwry.dat
    ▼
 data/ip2region.db (SQLite)     ← 段表 + 请求缓存，缓存即断点
    │  enrich    全段 /24 去重 + 中点探测，只补空
-   │  refine    大段 3 点探测，跨城市就二分切开
+   │  refine    大段边界递归收敛，只往"结论不同"的半边收敛到 /24
    ▼
 build/ip2region.txt
    │  merge     叠加 data/custom/*.txt（优先级最高）
@@ -308,10 +308,10 @@ enrich 会先用它定 ISP：
 - 不覆盖港澳台（只含中国大陆）
 - 云厂商段同样会给出 PoP 城市，与百度一个毛病
 
-### refine：大段细分
+### refine：边界递归收敛
 
 ```bash
-go run ./cmd/ip2region refine -threshold 4096 -depth 2 -qps 60
+go run ./cmd/ip2region refine -threshold 4096 -min-span 256 -qps 60
 go run ./cmd/ip2region refine -only-empty            # 只处理省市缺失的段
 go run ./cmd/ip2region refine -limit 100 -dry-run    # 试跑
 ```
@@ -319,30 +319,59 @@ go run ./cmd/ip2region refine -limit 100 -dry-run    # 试跑
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `-threshold` | 4096 | 只处理长度 ≥ 该值的段（4096 = /20） |
-| `-depth` | 2 | 二分递归深度上限，2 表示最多切 4 片 |
+| `-min-span` | 256 | 收敛到这个 IP 数就停（256 = /24），再细百度也分不出来 |
+| `-depth` | 20 | 递归深度安全阀，正常不会触发 |
+| `-seg-probes` | 128 | 单个段最多探测几次，防止归属混乱的段烧请求 |
 | `-qps` / `-workers` | 20 / 4 | 限速与并发 |
 | `-report` | `build/refine-report.tsv` | 细分明细输出 |
 | `-only-empty` | false | 只处理省市缺失的段 |
 
-**为什么需要这一步：** enrich 已经按密度多点探测，但它对每片只探一个点、且片内结论必须
-"一致才切"。refine 补的是另一半：对仍大于 /20 的段探**起点/中点/终点三个点**，
-三点不一致说明整段标签站不住脚，直接二分切开。
-
-enrich 加密后 refine 的工作量大幅下降：处理段数 16,792、实际细分 557 段
-（加密前是 3,171 段）。
+**核心：只往"结论不同"的那半边收敛，一直收敛到 /24。**
 
 ```
-探 起点 / 中点 / 终点
-  ├─ 三点归属一致 → 整段确认（1~3 次请求）
-  └─ 不一致      → 在 mid 处二分递归（深度受限）
+探 起点 lo / 中点 mid / 终点 hi
+  ├─ 三点一致       → 整段一个结论，结束
+  ├─ lo=mid ≠ hi    → 左半已确认，出一片，只收敛右半 [mid, hi]
+  ├─ lo ≠ mid=hi    → 右半已确认，只收敛左半 [lo, mid-1]
+  └─ 三点都不同     → 两半都要收敛
 ```
 
-细分产生的子段用"删+插"单事务替换原段，保持连续、不重不漏。
+这比"三点不一致就在 mid 处二分、两半都递归"省一半以上请求：一半区间已经确认了，
+没必要再探。
 
-实测：18,863 个大段里 15,692 个三点一致直接确认，3,171 个被切开，新增 7,781 段。
-典型例子 `1.15.0.0/16` 原来整段标"天津"，细分后是 北京 / 北京 / 北京 / 大连 四片。
+**成本对比。** 把一个边界定位到 256 IP 的精度：
 
-### merge：叠加自定义覆盖
+| 方法 | 请求数（/16 段） | 请求数（/10 段） | 边界精度 |
+|---|---|---|---|
+| 均匀采样（enrich 的做法） | 256 个点 | 16384 个点 | = 采样间隔 |
+| 递归收敛 | **8 轮 ≈ 10 次** | **14 轮 ≈ 16 次** | ≤ 256 IP |
+
+实测一个 /16 段（前 3/4 北京、后 1/4 大连），**10 次请求把边界定位到 1 个 IP 误差**
+（`internal/refine/refine_test.go: TestRefineConvergesToBoundary`）。
+
+真实数据上的效果：
+
+```
+1.83.229.113-1.84.0.255  原标"陕西省西安市"
+  → 1.83.229.113-1.84.0.33   陕西省西安市
+  → 1.84.0.34-1.84.0.255     陕西省汉中市     ← 边界精确到单 IP
+
+112.84.127.0-112.84.143.62  原标"江苏省徐州市"
+  → 112.84.127.0-112.84.128.2   江苏省徐州市
+  → 112.84.128.3-112.84.143.62  江苏省扬州市
+```
+
+细分产生的子段用"删+插"单事务替换原段，保持连续、不重不漏。收敛会切出一些
+同归属的碎片，`merge` 的 Compact 会合并回去，不影响最终产物。
+
+实测：15,141 个大段里 14,868 个三点一致直接确认，273 个收敛切开、新增 1,679 片，
+真实请求仅 1,143 次（其余 4.9 万次命中 enrich 留下的 /24 缓存）。
+
+**为什么有些大段收敛不动？** 例如 `59.192.0.0/10`（419 万 IP，中国移动）整段仍是
+"北京市"。查过缓存：这段的 83 个探测点，百度全部返回 `北京市北京市` ——
+整个区间没有变化点，递归收敛无从下手。这是数据源的天花板，不是算法问题。
+
+### merge：叠加自定义覆盖### merge：叠加自定义覆盖
 
 ```bash
 go run ./cmd/ip2region merge
@@ -676,7 +705,7 @@ cmd/ip2region/          唯一入口，子命令分发
   fetch.go              下载 qqwry.dat
   parse.go              解析落库
   enrich.go             百度补空
-  refine.go             大段细分
+  refine.go             边界递归收敛
   merge.go              叠加自定义覆盖
   build.go              生成 xdb
   verify.go             校验与对拍

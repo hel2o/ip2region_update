@@ -619,8 +619,12 @@ func TagSource(src, tag string) string {
 	return src + tag
 }
 
-// SameGeo 判断两次查询结果是否指向同一省市（忽略 市/区 后缀差异与空值）。
-// 供 refine 判断"三点是否一致"，两侧都为空也算一致（都无数据）。
+// SameGeo 判断两次查询结果是否指向同一省市（忽略 市/区 等后缀差异）。
+//
+// 注意：空值**不**视为相等。百度的返回粒度不稳定（同一条线路可能只有
+// "广东省"、也可能给"广东省深圳市"），若把"省同、市一空一有"当成一致，
+// 收敛时会漏掉市一级的真实边界。宁可多切一片（最终 Compact 会合并回去），
+// 也不要把两个不同的市误判成同一个。
 func SameGeo(a, b provider.Result) bool {
 	return trimAdminSuffix(a.Province) == trimAdminSuffix(b.Province) &&
 		trimAdminSuffix(a.City) == trimAdminSuffix(b.City)

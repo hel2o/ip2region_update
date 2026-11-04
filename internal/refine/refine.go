@@ -33,7 +33,9 @@ import (
 // Options 控制细分行为。
 type Options struct {
 	Threshold  int           // 只处理长度 >= 该值的段（默认 4096，即 /20）
-	MaxDepth   int           // 二分递归深度上限（默认 2，最多切出 4 片）
+	MinSpan    int           // 收敛到这个粒度就停（默认 256，即 /24）
+	MaxDepth   int           // 递归深度安全阀（默认 20）
+	SegProbes  int           // 单个段最多探测几次（默认 128，防止复杂段烧请求）
 	QPS        int           // 全局请求速率上限
 	Workers    int           // 并发处理的段数
 	Limit      int           // 最大请求数（0=不限）
@@ -76,8 +78,14 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	if opt.Threshold <= 0 {
 		opt.Threshold = 4096
 	}
+	if opt.MinSpan <= 0 {
+		opt.MinSpan = 256
+	}
+	if opt.SegProbes <= 0 {
+		opt.SegProbes = 128
+	}
 	if opt.MaxDepth <= 0 {
-		opt.MaxDepth = 2
+		opt.MaxDepth = 20
 	}
 	if opt.QPS <= 0 {
 		opt.QPS = 20
@@ -243,7 +251,8 @@ func (r *refiner) refineSegment(ctx context.Context, sg geo.Segment) error {
 	r.stat.BigSegments++
 	r.mu.Unlock()
 
-	pieces, err := r.resolve(ctx, sg, 0)
+	budget := r.opt.SegProbes
+	pieces, err := r.resolve(ctx, sg, 0, &budget)
 	if err != nil {
 		return err
 	}
@@ -276,12 +285,37 @@ func (r *refiner) refineSegment(ctx context.Context, sg geo.Segment) error {
 	return nil
 }
 
-// resolve 递归确认 [lo,hi] 的归属。
+// resolve 递归确认 [lo,hi] 的归属，只在"两端结论不同"的区间继续收敛。
 //
-// 三点一致 → 整段一个 piece；不一致 → 在 mid 处二分。深度用尽时取中点结果。
-func (r *refiner) resolve(ctx context.Context, sg geo.Segment, depth int) ([]geo.Segment, error) {
+// 每次探三个点（起点、中点、终点）：
+//
+//	三点一致     → 整段一个结论，左右都收敛完毕
+//	首=中 ≠ 尾   → 左半已确认，直接出一片，只往右半收敛
+//	首 ≠ 中=尾   → 右半已确认，只往左半收敛
+//	三点都不同   → 两半都要收敛
+//
+// 区间收到 MinSpan（默认 256 = /24）就停，因为再细百度也分不出来。
+//
+// 成本对比：每个边界定位到 MinSpan 只需要 log2(段长/MinSpan) 轮探测；
+// 而均匀采样要把边界定位到同样精度，需要 段长/MinSpan 个点。
+// 一个 /16 收敛到 /24 是 8 轮，均匀采样要 256 个点。
+//
+// budget 是本段的探测预算，用完就按当前已知结果落定，防止归属混乱的段
+// 无限递归。
+func (r *refiner) resolve(ctx context.Context, sg geo.Segment, depth int, budget *int) ([]geo.Segment, error) {
 	lo, hi := sg.Start, sg.End
 	mid := uint32((uint64(lo) + uint64(hi)) / 2)
+	span := uint64(hi) - uint64(lo) + 1
+
+	// 够细了 / 递归过深 / 预算用完：探中点直接定这一段
+	if span <= uint64(r.opt.MinSpan) || depth >= r.opt.MaxDepth || *budget <= 0 {
+		p, _, err := r.probeGeo(ctx, mid)
+		if err != nil {
+			return nil, err
+		}
+		return r.leaf(sg, p, depth)
+	}
+	*budget -= 3
 
 	pLo, _, err := r.probeGeo(ctx, lo)
 	if err != nil {
@@ -296,33 +330,67 @@ func (r *refiner) resolve(ctx context.Context, sg geo.Segment, depth int) ([]geo
 		return nil, err
 	}
 
-	same := enrich.SameGeo(pLo, pMid) && enrich.SameGeo(pMid, pHi)
-	if same || depth >= r.opt.MaxDepth || lo == hi {
-		geoOut := applyTo(pMid, sg.Geo)
-		if depth == 0 && same {
-			r.mu.Lock()
-			r.stat.Confirmed++
-			r.mu.Unlock()
+	leftSame := enrich.SameGeo(pLo, pMid)
+	rightSame := enrich.SameGeo(pMid, pHi)
+
+	// 三点一致：整段一个结论
+	if leftSame && rightSame {
+		return r.leaf(sg, pMid, depth)
+	}
+
+	// 左半已确认：出一片，只收敛右半
+	if leftSame {
+		left := r.piece(lo, mid-1, applyTo(pLo, sg.Geo), sg.Source)
+		right, err := r.resolve(ctx, geo.Segment{Start: mid, End: hi, Geo: sg.Geo, Source: sg.Source}, depth+1, budget)
+		if err != nil {
+			return nil, err
 		}
-		if !r.opt.DryRun && depth == 0 && geoOut != sg.Geo {
-			// 顶层（原段仍在库里）才写库；细分片由 ReplaceSegment 一并写入
+		return append([]geo.Segment{left}, right...), nil
+	}
+
+	// 右半已确认：只收敛左半
+	if rightSame {
+		right := r.piece(mid, hi, applyTo(pHi, sg.Geo), sg.Source)
+		left, err := r.resolve(ctx, geo.Segment{Start: lo, End: mid - 1, Geo: sg.Geo, Source: sg.Source}, depth+1, budget)
+		if err != nil {
+			return nil, err
+		}
+		return append(left, right), nil
+	}
+
+	// 三点都不同：两半都要收敛
+	left, err := r.resolve(ctx, geo.Segment{Start: lo, End: mid - 1, Geo: sg.Geo, Source: sg.Source}, depth+1, budget)
+	if err != nil {
+		return nil, err
+	}
+	right, err := r.resolve(ctx, geo.Segment{Start: mid, End: hi, Geo: sg.Geo, Source: sg.Source}, depth+1, budget)
+	if err != nil {
+		return nil, err
+	}
+	return append(left, right...), nil
+}
+
+// leaf 生成一个"不再细分"的段。
+func (r *refiner) leaf(sg geo.Segment, p provider.Result, depth int) ([]geo.Segment, error) {
+	geoOut := applyTo(p, sg.Geo)
+	if depth == 0 {
+		r.mu.Lock()
+		r.stat.Confirmed++
+		r.mu.Unlock()
+		// 顶层（原段仍在库里）才写库；细分片由 ReplaceSegment 一并写入
+		if !r.opt.DryRun && geoOut != sg.Geo {
 			_ = r.db.UpdateSegments([]store.SegmentUpdate{{
 				Start: sg.Start, Province: ptr(geoOut.Province), City: ptr(geoOut.City),
 				ISP: ispPtr(geoOut.ISP, sg.Geo.ISP), Source: enrich.TagSource(sg.Source, "+baidu"),
 			}})
 		}
-		return []geo.Segment{{Start: sg.Start, End: sg.End, Geo: geoOut, Source: enrich.TagSource(sg.Source, "+baidu")}}, nil
 	}
+	return []geo.Segment{r.piece(sg.Start, sg.End, geoOut, sg.Source)}, nil
+}
 
-	left, err := r.resolve(ctx, geo.Segment{Start: lo, End: mid - 1, Geo: sg.Geo, Source: sg.Source}, depth+1)
-	if err != nil {
-		return nil, err
-	}
-	right, err := r.resolve(ctx, geo.Segment{Start: mid, End: hi, Geo: sg.Geo, Source: sg.Source}, depth+1)
-	if err != nil {
-		return nil, err
-	}
-	return append(left, right...), nil
+// piece 构造一个细分片。
+func (r *refiner) piece(start, end uint32, g geo.GeoInfo, src string) geo.Segment {
+	return geo.Segment{Start: start, End: end, Geo: g, Source: enrich.TagSource(src, "+baidu")}
 }
 
 // applyTo 把探测结果合并进原有归属。

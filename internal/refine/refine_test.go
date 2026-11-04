@@ -167,3 +167,96 @@ func TestApplyToKeepsCountyAndFillsISP(t *testing.T) {
 		t.Fatalf("空 ISP 应被填充: %+v", out)
 	}
 }
+
+// copyProvider 按 IP 区间返回不同城市，用于验证递归收敛。
+// ranges 必须按 start 升序。
+type copyProvider struct {
+	ranges []rangeGeo
+	calls  map[uint32]int
+}
+
+type rangeGeo struct {
+	start, end uint32
+	res        provider.Result
+}
+
+func (p *copyProvider) Name() string { return "copy" }
+
+func (p *copyProvider) Lookup(_ context.Context, ip uint32) (provider.Result, error) {
+	if p.calls == nil {
+		p.calls = map[uint32]int{}
+	}
+	p.calls[ip]++
+	for _, r := range p.ranges {
+		if ip >= r.start && ip <= r.end {
+			return r.res, nil
+		}
+	}
+	return provider.Result{Raw: "中国"}, nil
+}
+
+// TestRefineConvergesToBoundary 验证"首中一致、尾不同"时只往右半收敛，
+// 且能把边界定位到 MinSpan 以内。
+func TestRefineConvergesToBoundary(t *testing.T) {
+	db := openTempDB(t)
+	// 一个 /16：前 3/4 是北京，后 1/4 是大连
+	const segStart, segEnd = 0x01000000, 0x0100FFFF
+	const boundary = 0x0100C000 // 3/4 处
+	segs := []geo.Segment{
+		{Start: 0, End: segStart - 1, Geo: geo.UnknownGeo, Source: "fill"},
+		{Start: segStart, End: segEnd, Source: "qqwry",
+			Geo: geo.GeoInfo{Country: "中国", Province: "天津市", City: "天津市", ISP: "中国联通"}},
+		{Start: segEnd + 1, End: 0xFFFFFFFF, Geo: geo.UnknownGeo, Source: "fill"},
+	}
+	if err := db.SaveSegments(segs); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &copyProvider{ranges: []rangeGeo{
+		{segStart, boundary - 1, provider.Result{Province: "北京市", City: "北京市", Raw: "北京市 电信"}},
+		{boundary, segEnd, provider.Result{Province: "辽宁省", City: "大连市", Raw: "辽宁省大连市 电信"}},
+	}}
+
+	st, err := Run(context.Background(), db, p, segs, Options{
+		Threshold: 4096, MinSpan: 256, QPS: 10000, Workers: 1, ProgressN: 10000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.LoadSegments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bj, dl []geo.Segment
+	for _, sg := range got {
+		if sg.Start < segStart || sg.End > segEnd {
+			continue
+		}
+		switch sg.Geo.Province {
+		case "北京市":
+			bj = append(bj, sg)
+		case "辽宁省":
+			dl = append(dl, sg)
+		}
+	}
+	if len(bj) == 0 || len(dl) == 0 {
+		t.Fatalf("应同时出现北京和大连两片，实际 北京%d 大连%d", len(bj), len(dl))
+	}
+	// 边界精度：北京片的最大 IP 与真实边界相差不超过 MinSpan
+	lastBJ := bj[len(bj)-1].End
+	diff := int64(boundary) - int64(lastBJ+1)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 256 {
+		t.Fatalf("边界定位误差 %d 个 IP，超过 MinSpan=256（北京末 IP=%x，真实边界=%x）",
+			diff, lastBJ, boundary)
+	}
+	// 收敛应该比均匀采样省请求：/16 均匀到 /24 需要 256 点
+	if st.Requests > 64 {
+		t.Fatalf("收敛用 %d 次请求，超过预期的 64 次", st.Requests)
+	}
+	t.Logf("细分 %d 段，请求 %d 次，缓存 %d 次，边界误差 %d IP",
+		st.SplitSegs, st.Requests, st.CacheHits, diff)
+}
