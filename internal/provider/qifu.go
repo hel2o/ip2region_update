@@ -86,6 +86,9 @@ func NewQifu(timeout time.Duration, opts ...QifuOption) *Qifu {
 // Name 返回 provider 名（用于缓存表 provider 字段）。
 func (q *Qifu) Name() string { return "qifu" }
 
+// Short 返回 source 标记用的短名。
+func (q *Qifu) Short() string { return "qifu" }
+
 // Lookup 查询单个 IP。
 func (q *Qifu) Lookup(ctx context.Context, ip uint32) (Result, error) {
 	u := q.endpoint + "?" + url.Values{"ip": {geo.Uint2IP(ip)}}.Encode()

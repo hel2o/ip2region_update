@@ -56,5 +56,20 @@ func CacheNames(p Provider) []string {
 	return []string{p.Name()}
 }
 
+// ShortNamer 是可选接口：返回写进 segments.source 的短名（如 qifu / baidu）。
+type ShortNamer interface {
+	Short() string
+}
+
+// ShortName 取来源短名，用于 source 标签（未实现 ShortNamer 时退化为 Name()）。
+func ShortName(p Provider) string {
+	if s, ok := p.(ShortNamer); ok {
+		if v := s.Short(); v != "" {
+			return v
+		}
+	}
+	return p.Name()
+}
+
 // nowMs 便于测试替换。
 var nowMs = func() int64 { return time.Now().UnixMilli() }

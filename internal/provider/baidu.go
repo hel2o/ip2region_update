@@ -64,6 +64,9 @@ func NewBaidu(timeout time.Duration, opts ...BaiduOption) *Baidu {
 // Name 返回 provider 名（用于缓存表 provider 字段）。
 func (b *Baidu) Name() string { return "baidu" }
 
+// Short 返回 source 标记用的短名。
+func (b *Baidu) Short() string { return "baidu" }
+
 // Lookup 查询单个 IP。
 func (b *Baidu) Lookup(ctx context.Context, ip uint32) (Result, error) {
 	q := url.Values{}

@@ -286,7 +286,19 @@ go run ./cmd/ip2region legacy -xdb old.xdb -include-cn         # 连国内一起
 实测：处理 26.99 万段（其中 7.5 万段被切开），补省 89.5 万处、补市 93.5 万处，
 涉及 21.5 亿 IP。境外省覆盖率 20.6% → **51.7%**，旧库有而我们没有的**全部归零**。
 
-### enrich：百度判断省市 + 补 ISP
+### enrich：外部源判断省市 + 补 ISP
+
+查询源默认是 **qifu**（`https://qifu.baidu.com/api/v1/ip-portrait/brief-info`），
+它无需 AK/Cookie，只要浏览器 UA + qifu 域 Referer；返回结构化字段
+（country/province/city/isp/scene/risk_score），比 opendata 的 `"广东省广州市 电信"`
+一个串更好解析。某个 IP 查不到或 qifu 异常时，自动回退旧的 opendata 接口。
+
+两个源共用 `ip_cache`，换源不会导致整库重查；要用新源把旧结果**全部重查一遍**时加
+`-refresh`（忽略历史 provider 的缓存，但仍复用本次已写入的，所以能断点续跑）。
+
+> qifu 实测（2026-11，约 6.3 万次）：无配额、无 429、不封 IP，恒速 40 QPS 连跑 5 分钟
+> 零错误；持续超 60 QPS 会出现尾部延迟爆炸 + 偶发 25s 超时，建议控在 20~45 QPS。
+> 软限流可能返回 HTTP 200 + 空 body，客户端已按失败处理。
 
 **探测布线：GeoCN 边界优先，片内再按 IP 数等分。**
 
@@ -327,10 +339,12 @@ go run ./cmd/ip2region enrich -only-empty
 |---|---|---|
 | `-qps` | 20 | 全局请求速率上限 |
 | `-workers` | 8 | 并发数 |
+| `-primary` | `qifu` | 主查询源：`qifu`（失败自动回退 opendata）/ `opendata` |
+| `-refresh` | false | 忽略换源前的历史缓存，全部重查（本次写入的缓存仍可断点续跑） |
 | `-limit` | 0 | 最多请求数，0 表示不限（试跑用） |
 | `-mask` | `/24` | 网段去重粒度，可选 `/24` `/16` `none` |
 | `-dry-run` | false | 只统计不写段表（**仍会写缓存**，避免重复烧请求） |
-| `-override` | **true** | 用百度覆盖已有省市；传 `-override=false` 退回只补空 |
+| `-override` | **true** | 用查询源覆盖已有省市；传 `-override=false` 退回只补空 |
 | `-ispip` | `data/ispip` | 运营商网段表目录，空串表示不用（建表前先跑 `fetch`） |
 | `-geocn` | `data/geocn/GeoCN.mmdb` | GeoCN 离线库，空串表示不补区县 |
 | `-amap-key` | `$AMAP_KEY` | 高德 Web 服务 Key，只用于补百度缺失的省市（留空不启用） |

@@ -116,6 +116,8 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	if len(cacheNames) == 0 {
 		cacheNames = provider.CacheNames(p)
 	}
+	// source 标记用真实来源（qifu / baidu），不再写死 +baidu
+	srcTag := "+" + provider.ShortName(p)
 
 	// 0. 先用运营商网段表定 ISP（分配归属，比百度可靠）
 	if opt.ISPTables != nil {
@@ -318,10 +320,10 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 
 					src := sg.Source
 					if ng != sg.Geo {
-						src = TagSource(src, "+baidu")
+						src = TagSource(src, srcTag)
 					}
 					if noGeo {
-						src = TagSource(src, baiduNoCity)
+						src = TagSource(src, srcTag+noCitySuffix)
 					}
 					a := aggs[part.idx]
 					if a == nil {
@@ -410,11 +412,12 @@ type geocnResult struct {
 	overridden                                 int // 百度没给省市，改用 GeoCN 的
 }
 
-// baiduNoCity 是"百度没给出市级"的来源标记。
+// noCitySuffix 是"查询源没给出市级"的来源标记后缀。
 //
-// 触发条件：百度返回的 city 为空（只回了"中国 移动"或只给到省）。
+// 触发条件：查询源返回的 city 为空（只回了"中国 移动"或只给到省）。
 // 打了这个标记的段，省市只能靠 qqwry，此时允许 GeoCN 按"谁的层级更深"竞争。
-const baiduNoCity = "+baidu-nocity"
+// 前缀是查询源短名（+qifu / +baidu），后缀固定，换源后旧标记仍能被识别。
+const noCitySuffix = "-nocity"
 
 // maxDistrictSpan 是可信区县的最大跨度。
 //
@@ -454,7 +457,7 @@ func applyGeoCN(db *store.DB, segs []geo.Segment, gc *geocn.DB, dryRun bool) geo
 		// 百度对这段完全没给省市（只返回"中国 移动"这类）时，qqwry 的值没有任何
 		// 独立证据支撑，而 GeoCN 有明确判断——此时允许 GeoCN 覆盖省市。
 		// 否则会出现 111.55.211.0/19（11520 个 IP，实为广东/重庆）整段标"山西省"。
-		allowOverride := strings.Contains(sg.Source, baiduNoCity)
+		allowOverride := strings.Contains(sg.Source, noCitySuffix)
 		runs := buildRuns(sg, slices, &res, allowOverride)
 		if len(runs) == 0 {
 			continue

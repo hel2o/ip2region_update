@@ -44,6 +44,9 @@ func (c *Chain) Name() string {
 	return c.primary.Name() + "+" + c.secondary.Name()
 }
 
+// Short 返回 source 标记用的短名：取主源（数据基本都由主源产出）。
+func (c *Chain) Short() string { return c.primary.Name() }
+
 // CacheNames 返回可复用缓存的所有 provider 名（含历史名与组合名）。
 //
 // 关键：换源后旧缓存（provider="baidu"）仍然命中，不会因为改名而白跑一遍。
