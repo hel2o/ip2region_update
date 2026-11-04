@@ -79,7 +79,7 @@ searcher, err := xdb.NewWithBuffer(cBuff)
 | 市 | 91.54% | qqwry + 百度补空 |
 | 区县 | 4.67% | 仅 qqwry 有 |
 | 乡镇 | 15.01% | 仅 qqwry 有 |
-| ISP | 89.56% | qqwry + 百度补空 |
+| ISP | 90.48% | qqwry + APNIC 网段表 + 百度补空 |
 
 **区/镇覆盖率低是数据源的天花板**，百度接口只到城市级。要高精度只能靠人工覆盖。
 
@@ -90,7 +90,7 @@ searcher, err := xdb.NewWithBuffer(cBuff)
 | 项目 | 旧版（20250721） | 当前（20261028） |
 |---|---|---|
 | 文件数 | 3 份（`_i` / `_m` / `_qqwry`） | 1 份 |
-| 数据源 | qqwry + 爱奇艺 API / 美团 API | qqwry + 百度接口 |
+| 数据源 | qqwry + 爱奇艺 API / 美团 API | qqwry + APNIC 网段表 + 百度接口 |
 | 区域串 | 不统一（部分是 `广东–广州腾讯云` 这种未拆分串） | 统一 6 段 |
 | 区/镇 | 0% | 4.67% / 15.01% |
 | 人工覆盖 | 无 | `data/custom/*.txt`，36 条 |
@@ -154,4 +154,5 @@ git push origin main
   覆盖等于抛硬币
 - **云/CDN/IDC 段永远不覆盖**：腾讯云、阿里云、CloudFlare 这类段的流量落点由路由决定，
   探到的只是 PoP 城市
+- **ISP 先看 APNIC 网段表**（ispip.m27.tech）：分配归属比探测位置可靠
 - **区/镇永不改动**：只认 qqwry
