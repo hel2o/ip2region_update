@@ -51,7 +51,7 @@ func runMerge(args []string) error {
 	// 清掉 "CZ88.NET" 之类的数据源水印，必须在 Compact 之前，
 	// 这样清空同名字段后的相邻段才能合并回一段
 	if n := sanitizeSegments(merged); n > 0 {
-		log.Printf("清除 CZ88 水印: %d 段", n)
+		log.Printf("清洗字段（水印/重复层级）: %d 段", n)
 	}
 	merged = geo.Compact(merged)
 	if err := geo.Validate(merged); err != nil {

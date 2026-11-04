@@ -42,7 +42,7 @@ func runBuild(args []string) error {
 		}
 		log.Printf("载入段表: %d 段", len(segs))
 		if n := sanitizeSegments(segs); n > 0 {
-			log.Printf("清除 CZ88 水印: %d 段", n)
+			log.Printf("清洗字段（水印/重复层级）: %d 段", n)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(*src), 0o755); err != nil {
