@@ -49,6 +49,7 @@ type Options struct {
 	ProbeStep    int               // 每多少 IP 布一个探测点（0 = 每段只探中点）
 	ProbeCap     int               // 每个段最多探几个点（0 = 不封顶）
 	MinPiece     int               // GeoCN 切片小于该值就与相邻片合并（0 = 不合并）
+	CacheNames   []string          // 只复用这些 provider 的缓存；nil = 用 provider.CacheNames(p)
 }
 
 // Stats 是执行统计。
@@ -108,6 +109,13 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	}
 
 	var st Stats
+
+	// 缓存匹配名：默认包含换源前的历史 provider；刷新模式下只认本次来源，
+	// 这样"忽略旧源结果"和"断点续跑"能同时成立。
+	cacheNames := opt.CacheNames
+	if len(cacheNames) == 0 {
+		cacheNames = provider.CacheNames(p)
+	}
 
 	// 0. 先用运营商网段表定 ISP（分配归属，比百度可靠）
 	if opt.ISPTables != nil {
@@ -179,6 +187,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	var confMu sync.Mutex
 
 	var reqCount int64
+	var errLogN int32
 	var ctxStop atomic.Bool
 	stopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -194,7 +203,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 				}
 
 				// 先查 DB 缓存（同 /24 任一条即可；换源后历史缓存也要命中）
-				if cached, ok, err := db.GetCacheInRangeAny(pr.key, pr.key|^opt.Mask, provider.CacheNames(p)); err == nil && ok {
+				if cached, ok, err := db.GetCacheInRangeAny(pr.key, pr.key|^opt.Mask, cacheNames); err == nil && ok {
 					res := provider.Result{
 						Province: cached.Province, City: cached.City,
 						County: cached.District, ISP: cached.ISP, Raw: cached.Raw,
@@ -235,6 +244,9 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 					continue
 				}
 				if err != nil {
+					if atomic.AddInt32(&errLogN, 1) <= 5 {
+						log.Printf("请求失败样例 ip=%s: %v", geo.Uint2IP(pr.ip), err)
+					}
 					out <- probeResult{pr: pr, err: err}
 					continue
 				}

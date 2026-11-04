@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ip2region.xdb 一键同步到 3 台机器的 6 个目录，并调用各服务的重载接口
+# ip2region.xdb 一键同步到 3 台机器的 7 个目录，并调用各服务的重载接口
 #
 #   ./sync.sh                同步 build/ip2region.xdb 到全部目标，成功后自动重载
 #   ./sync.sh -n             只看会做什么，不实际传（dry-run）
@@ -16,6 +16,7 @@
 #   192.168.99.26  /home/work/workspace/src/github.com/hel2o/management-system/xdb/ip2region.xdb
 #   192.168.99.26  /home/work/workspace/src/github.com/hel2o/sniffer/ip2region.xdb
 #   192.168.99.26  /home/work/workspace/src/github.com/hel2o/english_school/ip2region.xdb
+#   192.168.99.26  /home/work/go-syslog/ip2region.xdb
 #   172.25.0.19    /home/sniffer/ip2region.xdb
 #   172.19.99.1    /home/english_school/ip2region.xdb
 #
@@ -41,6 +42,7 @@ TARGETS=(
     "192.168.99.26|/home/work/workspace/src/github.com/hel2o/management-system/xdb/ip2region.xdb"
     "192.168.99.26|/home/work/workspace/src/github.com/hel2o/sniffer/ip2region.xdb"
     "192.168.99.26|/home/work/workspace/src/github.com/hel2o/english_school/ip2region.xdb"
+    "192.168.99.26|/home/work/go-syslog/ip2region.xdb"
     "172.25.0.19|/home/sniffer/ip2region.xdb"
     "172.19.99.1|/home/english_school/ip2region.xdb"
 )
@@ -50,6 +52,7 @@ RELOADS=(
     "sniffer|http://172.25.0.19:8080/reloadIp2Region"
     "english_school|https://cs.clifford.cn/reloadxdb"
     "management-system|https://network.clifford.cn/api/admin/reloadIp2Region"
+    "go-syslog|https://network.clifford.cn:1993/xdb/reload"
 )
 
 # 调试用：IPREGION_TARGETS="host|path;host|path" / IPREGION_RELOADS="name|url|0;name2|url2|1"
@@ -70,7 +73,7 @@ while [ $# -gt 0 ]; do
         -skip-reload|--no-reload) SKIP_RELOAD=1; shift ;;
         -strict-reload) STRICT_RELOAD=1; shift ;;
         -ms-cookie)     MS_COOKIE="$2"; shift 2 ;;
-        -h|--help)      sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "未知参数: $1（-h 看用法）" >&2; exit 2 ;;
     esac
 done

@@ -33,6 +33,8 @@ func runEnrich(args []string) error {
 	ispDir := fs.String("ispip", "data/ispip", "运营商网段表目录（空串=不用）")
 	geocnPath := fs.String("geocn", "data/geocn/GeoCN.mmdb", "GeoCN 离线库路径（空串=不补区县）")
 	amapKey := fs.String("amap-key", os.Getenv("AMAP_KEY"), "高德 Web 服务 Key（只用于补百度缺失的省市，留空则不启用）")
+	primary := fs.String("primary", "qifu", "主查询源: qifu（默认，失败自动回退 opendata）| opendata")
+	refresh := fs.Bool("refresh", false, "刷新模式：忽略换源前的历史缓存，全部重新查询（本次写入的缓存仍可断点续跑）")
 	probeStep := fs.Int("probe-step", 2048, "每多少 IP 布一个探测点（0=每段只探中点）")
 	probeCap := fs.Int("probe-cap", 256, "每个段最多几个探测点（0=不封顶）")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就与相邻片合并（0=不合并）")
@@ -92,12 +94,22 @@ func runEnrich(args []string) error {
 		}
 	}
 
-	p := provider.NewBaidu(*timeout)
+	p, err := buildSource(*primary, *timeout)
+	if err != nil {
+		return err
+	}
 
 	var fb provider.Provider
 	if a := provider.NewAmap(*amapKey, *timeout); a != nil {
 		fb = a
 		log.Printf("备用源已启用: 高德 IP 定位（仅在百度没给省市时调用，注意月度配额）")
+	}
+
+	// 刷新模式：只复用本次来源写入的缓存，历史上的旧源结果一律重查。
+	var cacheNames []string
+	if *refresh {
+		cacheNames = []string{p.Name()}
+		log.Printf("刷新模式：忽略 provider≠%q 的历史缓存，全部重新查询", p.Name())
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -122,6 +134,7 @@ func runEnrich(args []string) error {
 		ProbeStep:    *probeStep,
 		ProbeCap:     *probeCap,
 		MinPiece:     *minPiece,
+		CacheNames:   cacheNames,
 	})
 
 	fmt.Println("---- enrich 统计 ----")
@@ -134,7 +147,7 @@ func runEnrich(args []string) error {
 	fmt.Printf("  失败              : %d\n", st.Errors)
 	fmt.Printf("修正省              : %d\n", st.ProvFixed)
 	fmt.Printf("修正市              : %d\n", st.CityFixed)
-	fmt.Printf("填充 ISP（百度）    : %d\n", st.ISPFilled)
+	fmt.Printf("填充 ISP（查询源）  : %d\n", st.ISPFilled)
 	fmt.Printf("补 ISP（网段表）    : %d\n", st.ISPFilledByNet)
 	fmt.Printf("纠 ISP（网段表）    : %d\n", st.ISPFixedByNet)
 	fmt.Printf("补区县（GeoCN）     : %d\n", st.CountyFilled)
@@ -144,7 +157,7 @@ func runEnrich(args []string) error {
 	fmt.Printf("耗时                : %s\n", st.Elapsed.Round(time.Millisecond))
 
 	if errors.Is(err, provider.ErrBlocked) {
-		return fmt.Errorf("被百度限流/封禁，已停止。缓存已保留，稍后重跑会从缓存继续")
+		return fmt.Errorf("被查询源限流/封禁，已停止。缓存已保留，稍后重跑会从缓存继续")
 	}
 	if errors.Is(err, context.Canceled) {
 		log.Printf("已中断，缓存已保留，可重跑继续")

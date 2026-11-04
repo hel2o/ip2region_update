@@ -158,7 +158,7 @@ rebuild.bat -only-custom        :: 或 ./rebuild.sh -only-custom
 > （字节级比对只差这 1 个字节），不要用 md5 判断数据是否变化。
 
 
-出库后要推到各项目用，接着跑 `./sync.sh`（见[同步到 3 台机器的 6 个目录并重载](#同步到-3-台机器的-6-个目录并重载)）。
+出库后要推到各项目用，接着跑 `./sync.sh`（见[同步到 3 台机器的 7 个目录并重载](#同步到-3-台机器的-7-个目录并重载)）。
 
 ---
 
@@ -744,7 +744,7 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 
 替换 xdb 文件后重启进程即可。用 `NewWithBuffer` 把文件读进内存的方式，必须重启才会重新加载。
 
-### 同步到 3 台机器的 6 个目录并重载
+### 同步到 3 台机器的 7 个目录并重载
 
 `sync.sh`（Windows 用 `sync.bat`）把 `build/ip2region.xdb` 推到 3 台机器，文件全部到位
 后再调各服务的重载接口，让进程立刻用上新库：
@@ -755,6 +755,7 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 | `192.168.99.26` | `/home/work/workspace/src/github.com/hel2o/management-system/xdb/ip2region.xdb` | 管理平台源码目录 |
 | `192.168.99.26` | `/home/work/workspace/src/github.com/hel2o/sniffer/ip2region.xdb` | sniffer 源码目录 |
 | `192.168.99.26` | `/home/work/workspace/src/github.com/hel2o/english_school/ip2region.xdb` | english_school 源码目录 |
+| `192.168.99.26` | `/home/work/go-syslog/ip2region.xdb` | go-syslog 运行目录 |
 | `172.25.0.19` | `/home/sniffer/ip2region.xdb` | sniffer 运行目录 |
 | `172.19.99.1` | `/home/english_school/ip2region.xdb` | english_school 运行目录 |
 
@@ -765,6 +766,7 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 | sniffer | `http://172.25.0.19:8080/reloadIp2Region` | `{"code":0,"costMs":36,...,"message":"ok"}` |
 | english_school | `https://cs.clifford.cn/reloadxdb` | `{"code":1,"message":"ok","data":{"path":"ip2region.xdb",...}}` |
 | management-system | `https://network.clifford.cn/api/admin/reloadIp2Region` | `{"code":3000,"msg":"reloaded"}` |
+| go-syslog | `https://network.clifford.cn:1993/xdb/reload` | `{"msg":"success","file":"ip2region.xdb","size":...,"mtime":...}` |
 
 ```bash
 ./sync.sh              # 同步 + 重载
@@ -776,10 +778,14 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 ./sync.sh -ms-cookie 'token=..;account=..'   # 可选：给重载接口带登录 Cookie
 ```
 
-> 三个接口 2026-11-04 起都免登录。`management-system` 的那个原本挂在 `AuthMiddleware` 后面，
+> 四个接口 2026-11-04 起都免登录。`management-system` 的那个原本挂在 `AuthMiddleware` 后面，
 > 现在单独放开了；以后若改回鉴权，脚本会打出 `[失败] … {"code":4001,"errMsg":"请先登录"}`，
 > 这时用 `-ms-cookie`（或环境变量 `IPREGION_MS_COOKIE`）把浏览器的 `token` + `account`
 > 传进去即可。Cookie 会过期，不建议写死进脚本。
+>
+> `go-syslog` 走的是它自己的 `GET /xdb/reload`（源码在 `hel2o/go-syslog` 的 `http/router.go`），
+> 该端口是直连的 HTTPS，必须带 `:1993`；`/xdb/reload` 大小写敏感，写错就是 gin 的
+> `404 page not found`。它重载后返回的 `mtime`/`size` 就是当前生效的库，可用来确认是否真的换上了。
 
 实现要点（都是为了避免线上读到半截文件）：
 
@@ -1065,7 +1071,7 @@ _legacy/                旧实现归档，不参与编译（不进 git）
 rebuild.bat             Windows 一键重建（双击可用）
 rebuild.sh              Linux/macOS 一键重建
 sync.bat                Windows 一键同步 + 重载（双击可用）
-sync.sh                 同步 xdb 到 3 台机器 6 个目录并调重载接口
+sync.sh                 同步 xdb 到 3 台机器 7 个目录并调重载接口
 ```
 
 ---

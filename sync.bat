@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
 REM  ip2region sync launcher (Windows)
-REM    sync.bat              sync build\ip2region.xdb to 6 targets on 3 hosts, then reload
+REM    sync.bat              sync build\ip2region.xdb to 7 targets on 3 hosts, then reload
 REM    sync.bat -n           dry-run, show what would change
 REM    sync.bat -keep 5      keep 5 backups per target
 REM    sync.bat -skip-reload files only, do not call reload APIs

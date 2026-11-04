@@ -33,6 +33,7 @@ func runRefine(args []string) error {
 	progressN := fs.Int("progress", 500, "每 N 个段打进度")
 	report := fs.String("report", "build/refine-report.tsv", "细分明细输出（空则不写）")
 	timeout := fs.Duration("timeout", 10*time.Second, "单请求超时")
+	primary := fs.String("primary", "qifu", "主查询源: qifu（默认，失败自动回退 opendata）| opendata")
 	_ = fs.Parse(args)
 
 	db, err := store.Open(*dbPath)
@@ -52,7 +53,10 @@ func runRefine(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	p := provider.NewBaidu(*timeout)
+	p, err := buildSource(*primary, *timeout)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll("build", 0o755); err != nil {
 		return err
 	}
