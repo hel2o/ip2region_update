@@ -9,3 +9,6 @@ testdata/golden/
 ip2region_update/
 data/ispip/
 data/geocn/
+
+# 临时脚本与压测产物，不入库（.workbuddy/memory 仍跟踪）
+.workbuddy/tmp/
