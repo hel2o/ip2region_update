@@ -23,6 +23,10 @@
 # 做法：每台机器先 scp 一份到远端 /tmp（按 md5 命名，已存在则跳过上传），
 # 再在远端循环分发——备份旧文件 → 写同目录临时文件 → chown/chmod 对齐 →
 # mv 原子替换 → 校验 md5。文件全部到位后才调用重载接口。
+#
+# 重载路径统一为 /xdb/reload（各服务 host:port 不同），返回
+# {"file":..,"msg":"success","mtime":..,"reloadTime":..,"size":..}；
+# 脚本会拿 size 和本地文件比，对不上就报「不一致」，能立刻发现加载了旧文件。
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -47,11 +51,13 @@ TARGETS=(
     "172.19.99.1|/home/english_school/ip2region.xdb"
 )
 
-# 重载接口：名称|URL
+# 重载接口：名称|URL[|备选URL,备选URL...]
+# 统一为 /xdb/reload，返回 {"file":..,"msg":"success","mtime":..,"reloadTime":..,"size":..}；
+# 备选 URL 只在主 URL 返回 404（前缀/路由没对上）时才尝试。
 RELOADS=(
-    "sniffer|http://172.25.0.19:8080/reloadIp2Region"
-    "english_school|https://cs.clifford.cn/reloadxdb"
-    "management-system|https://network.clifford.cn/api/admin/reloadIp2Region"
+    "sniffer|http://172.25.0.19:8080/xdb/reload"
+    "english_school|https://cs.clifford.cn/xdb/reload"
+    "management-system|https://network.clifford.cn/xdb/reload|https://network.clifford.cn/api/admin/xdb/reload,https://network.clifford.cn/api/xdb/reload"
     "go-syslog|https://network.clifford.cn:1993/xdb/reload"
 )
 
@@ -73,7 +79,7 @@ while [ $# -gt 0 ]; do
         -skip-reload|--no-reload) SKIP_RELOAD=1; shift ;;
         -strict-reload) STRICT_RELOAD=1; shift ;;
         -ms-cookie)     MS_COOKIE="$2"; shift 2 ;;
-        -h|--help)      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)      sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "未知参数: $1（-h 看用法）" >&2; exit 2 ;;
     esac
 done
@@ -282,23 +288,64 @@ fi
 echo
 echo "==== 调用重载接口 ===="
 RELOAD_FAILED=0
+SRC_SIZE=$(wc -c < "$SRC" | tr -d ' ')
 for spec in "${RELOADS[@]}"; do
-    name="${spec%%|*}"; url="${spec#*|}"
+    name="${spec%%|*}"; rest="${spec#*|}"
+    url="${rest%%|*}"
+    alts=""
+    [ "$rest" != "$url" ] && alts="${rest#*|}"
 
-    if [ -n "$MS_COOKIE" ]; then
-        RAW=$(curl -sS -k -m 15 -w '\n%{http_code}' -H "Cookie: $MS_COOKIE" "$url" 2>&1) || true
-    else
-        RAW=$(curl -sS -k -m 15 -w '\n%{http_code}' "$url" 2>&1) || true
+    # 主 URL 优先；只有 404 才试备选前缀（同一服务不同挂载位置）
+    TRY_URLS="$url"
+    if [ -n "$alts" ]; then
+        IFS=',' read -r -a _alts <<< "$alts"
+        for a in "${_alts[@]}"; do [ -n "$a" ] && TRY_URLS="$TRY_URLS $a"; done
     fi
 
-    code=$(printf '%s\n' "$RAW" | tail -n 1)
-    body=$(printf '%s\n' "$RAW" | sed '$d' | tr -d '\r')
+    code=""; body=""
+    for u in $TRY_URLS; do
+        if [ -n "$MS_COOKIE" ]; then
+            RAW=$(curl -sS -k -m 20 -w '\n%{http_code}' -H "Cookie: $MS_COOKIE" "$u" 2>&1) || true
+        else
+            RAW=$(curl -sS -k -m 20 -w '\n%{http_code}' "$u" 2>&1) || true
+        fi
+        code=$(printf '%s\n' "$RAW" | tail -n 1)
+        body=$(printf '%s\n' "$RAW" | sed '$d' | tr -d '\r')
+        if [ "$code" = "200" ]; then break; fi
+    done
 
-    if [ "$code" = "200" ] && ! printf '%s' "$body" | grep -q '"code":400[0-9]'; then
-        printf '  [重载] %-17s ok  %s\n' "$name" "$(printf '%s' "$body" | head -c 100)"
-    else
-        printf '  [失败] %-17s HTTP %s  %s\n' "$name" "$code" "$(printf '%s' "$body" | head -c 120)"
+    if [ "$code" != "200" ]; then
+        if [ "$code" = "404" ]; then
+            printf '  [失败] %-17s HTTP 404  路径不存在（服务端还没发布 /xdb/reload？）\n' "$name"
+        else
+            printf '  [失败] %-17s HTTP %s  %s\n' "$name" "$code" "$(printf '%s' "$body" | head -c 120)"
+        fi
         RELOAD_FAILED=1
+        continue
+    fi
+
+    # 业务层失败：4001/4002 之类的 code，或非空 errMsg
+    if printf '%s' "$body" | grep -qE '"code":40[0-9][0-9]|"errMsg":"[^"]+"'; then
+        printf '  [失败] %-17s %s\n' "$name" "$(printf '%s' "$body" | head -c 130)"
+        RELOAD_FAILED=1
+        continue
+    fi
+
+    # 新格式统一回 size，用它确认加载的就是刚推上去的那份
+    # 用 sed 而不是 grep -o：grep 无匹配会返回 1，配合 pipefail 会让赋值语句直接退出脚本
+    got_size=$(printf '%s' "$body" | sed -n 's/.*"size"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' | head -1)
+    got_mtime=$(printf '%s' "$body" | sed -n 's/.*"mtime"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+
+    if [ -n "$got_size" ] && [ "$got_size" != "$SRC_SIZE" ]; then
+        printf '  [不一致] %-17s size=%s 期望=%s（加载的不是刚同步的文件）\n' "$name" "$got_size" "$SRC_SIZE"
+        RELOAD_FAILED=1
+        continue
+    fi
+
+    if [ -n "$got_size" ]; then
+        printf '  [重载] %-17s ok  size=%s  mtime=%s\n' "$name" "$got_size" "${got_mtime:--}"
+    else
+        printf '  [重载] %-17s ok  %s\n' "$name" "$(printf '%s' "$body" | head -c 100)"
     fi
 done
 

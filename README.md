@@ -759,14 +759,24 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 | `172.25.0.19` | `/home/sniffer/ip2region.xdb` | sniffer 运行目录 |
 | `172.19.99.1` | `/home/english_school/ip2region.xdb` | english_school 运行目录 |
 
-重载接口（文件全部同步成功后才调；任一目标同步失败就整轮不重载，避免新旧混读）：
+重载接口（文件全部同步成功后才调；任一目标同步失败就整轮不重载，避免新旧混读）。
+2026-11-04 起四个服务统一为 `GET /xdb/reload`，返回同一套 JSON：
 
-| 服务 | 接口 | 返回 |
-|---|---|---|
-| sniffer | `http://172.25.0.19:8080/reloadIp2Region` | `{"code":0,"costMs":36,...,"message":"ok"}` |
-| english_school | `https://cs.clifford.cn/reloadxdb` | `{"code":1,"message":"ok","data":{"path":"ip2region.xdb",...}}` |
-| management-system | `https://network.clifford.cn/api/admin/reloadIp2Region` | `{"code":3000,"msg":"reloaded"}` |
-| go-syslog | `https://network.clifford.cn:1993/xdb/reload` | `{"msg":"success","file":"ip2region.xdb","size":...,"mtime":...}` |
+```json
+{"file":"ip2region.xdb","msg":"success","mtime":"2025-08-21 15:01:54","reloadTime":"2026-11-04 20:45:39","size":44407644}
+```
+
+| 服务 | 接口 |
+|---|---|
+| sniffer | `http://172.25.0.19:8080/xdb/reload` |
+| english_school | `https://cs.clifford.cn/xdb/reload` |
+| management-system | `https://network.clifford.cn/xdb/reload` |
+| go-syslog | `https://network.clifford.cn:1993/xdb/reload` |
+
+脚本会解析返回里的 `size`，与本地文件字节数比对：**对不上就报 `[不一致]`**，说明服务加载的
+不是刚推上去的那份（通常是路径不对或进程工作目录不同）。`mtime` 也会一并打印，方便确认生效时间。
+HTTP 404 会提示「服务端还没发布 /xdb/reload」；`management-system` 配了
+`/api/admin/xdb/reload`、`/api/xdb/reload` 两个备选前缀，主路径 404 时自动回退尝试。
 
 ```bash
 ./sync.sh              # 同步 + 重载
@@ -778,14 +788,14 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 ./sync.sh -ms-cookie 'token=..;account=..'   # 可选：给重载接口带登录 Cookie
 ```
 
-> 四个接口 2026-11-04 起都免登录。`management-system` 的那个原本挂在 `AuthMiddleware` 后面，
-> 现在单独放开了；以后若改回鉴权，脚本会打出 `[失败] … {"code":4001,"errMsg":"请先登录"}`，
-> 这时用 `-ms-cookie`（或环境变量 `IPREGION_MS_COOKIE`）把浏览器的 `token` + `account`
-> 传进去即可。Cookie 会过期，不建议写死进脚本。
+> 四个接口 2026-11-04 起都免登录。`management-system` 的那个原本挂在 `AuthMiddleware` 后面
+> （`/api/admin/reloadIp2Region`），现在统一到 `/xdb/reload` 并放在免鉴权区；以后若改回鉴权，
+> 脚本会打出 `[失败] … {"code":4001,...}`，这时用 `-ms-cookie`（或环境变量 `IPREGION_MS_COOKIE`）
+> 把浏览器的 `token` + `account` 传进去即可。Cookie 会过期，不建议写死进脚本。
 >
-> `go-syslog` 走的是它自己的 `GET /xdb/reload`（源码在 `hel2o/go-syslog` 的 `http/router.go`），
-> 该端口是直连的 HTTPS，必须带 `:1993`；`/xdb/reload` 大小写敏感，写错就是 gin 的
-> `404 page not found`。它重载后返回的 `mtime`/`size` 就是当前生效的库，可用来确认是否真的换上了。
+> 路径大小写敏感，`/xdb/reload` 写错就是 gin 的 `404 page not found`。`go-syslog` 必须带
+> `:1993`（它自己起的 HTTPS，不是 443 上的管理平台）；源码在 `hel2o/go-syslog` 的 `http/router.go`，
+> 对应 `db.ReloadIP2Region()`。
 
 实现要点（都是为了避免线上读到半截文件）：
 
