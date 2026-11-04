@@ -188,7 +188,7 @@ go run ./cmd/ip2region enrich -only-empty
 | `-limit` | 0 | 最多请求数，0 表示不限（试跑用） |
 | `-mask` | `/24` | 网段去重粒度，可选 `/24` `/16` `none` |
 | `-dry-run` | false | 只统计不写段表（**仍会写缓存**，避免重复烧请求） |
-| `-override` | false | 允许覆盖已有省市，默认只补空 |
+| `-override` | **true** | 用百度覆盖已有省市；传 `-override=false` 退回只补空 |
 | `-ispip` | `data/ispip` | 运营商网段表目录，空串表示不用（建表前先跑 `fetch`） |
 | `-geocn` | `data/geocn/GeoCN.mmdb` | GeoCN 离线库，空串表示不补区县 |
 | `-only-empty` | false | 只处理省市缺失的段 |
@@ -201,10 +201,12 @@ go run ./cmd/ip2region enrich -only-empty
 - **默认只补空，不覆盖。** 实测百度在省市上的准确率和 qqwry 是同一量级
   （40 个改动样本交叉验证：新值 82.1%、旧值 82.1%，完全打平），覆盖等于抛硬币。
   真正的收益全在填空。
-- **云/CDN/IDC 段永远不覆盖**（`regions.IsCloudISP`）。腾讯云、阿里云、CloudFlare、
+- **云/CDN/IDC 段永远只补空**（`regions.IsCloudISP`）。腾讯云、阿里云、CloudFlare、
   Akamai、BGP 多线、IDC 机房这类段的 IP 归属方是云厂商，但流量落在哪个 PoP 由路由决定，
   百度探到的是 PoP 城市而不是网段归属地。实测 `1.12.0.0/14`（腾讯云）百度说北京，
   qqwry 和另外两个独立源都说广东。这类段共 3,948 段 / 3,489 万 IP（中国空间 8.7%）。
+- **省市被改写时，旧区县和镇一律清空**。挂在旧市下面的区县（如"长春市|玄武区"）在新市下
+  不成立，先清掉再由 GeoCN 按新省市重填。
 - **ISP 先看运营商网段表，再考虑百度。** `data/ispip/` 是 APNIC 分配记录，判"归属方"比百度
   可靠（见下节）。百度只负责填空。
 - **区/镇永不改动。** 百度和 qqwry 都给不出可靠的区镇信息。
@@ -221,6 +223,9 @@ go run ./cmd/ip2region enrich -only-empty
 
 它和百度的本质区别：**这是分配归属，不是探测点位置**。所以 `1.12.0.0/14`（腾讯云）不会被
 说成"北京电信"，也不受 anycast / PoP 影响。
+
+**执行顺序：网段表定 ISP → 百度改省市 → GeoCN 补区县。** GeoCN 放在百度之后，
+因为它填区县前要先校验省市自洽，必须拿百度的最终值去校验。
 
 enrich 会先用它定 ISP：
 

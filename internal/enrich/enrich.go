@@ -52,6 +52,7 @@ type Stats struct {
 	ISPFilledByNet int // 网段表补充的 ISP
 	ISPFixedByNet  int // 网段表纠正的 ISP（云/IDC 优先）
 	CountyFilled   int // GeoCN 补的区县
+	CountyCleared  int // 因省市变更而清空的旧区县
 	GeoCNConflict  int // GeoCN 与现有省市不一致而放弃的段
 	Segments   int // 参与增强的段数（中国段）
 	Probes     int // 去重后的探测点数
@@ -102,14 +103,6 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		}
 		st.ISPFilledByNet, st.ISPFixedByNet = filled, fixed
 		log.Printf("网段表定 ISP: 补空 %d 段, 纠正 %d 段", filled, fixed)
-	}
-
-	// 0.5 用 GeoCN 补区县（其他源都到不了这一级）
-	if opt.GeoCN != nil {
-		g := applyGeoCN(db, segs, opt.GeoCN, opt.DryRun)
-		st.CountyFilled, st.GeoCNConflict = g.county, g.conflict
-		log.Printf("GeoCN 补区县: %d 段（省市不一致放弃 %d 段，云段跳过 %d 段）",
-			g.county, g.conflict, g.cloud)
 	}
 
 	// 1. 组装 probe 列表（按 /24 去重）
@@ -266,6 +259,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 				ups, kinds, conf := decide(segs, r.pr, r.res, opt.Override)
 				st.ProvFixed += kinds.prov
 				st.CityFixed += kinds.city
+				st.CountyCleared += kinds.countyCleared
 				st.ISPFilled += kinds.isp
 				st.Conflicts += conf.n
 				if conf.sample != "" && len(conflicts) < opt.MaxConflicts {
@@ -293,6 +287,14 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	close(out)
 	<-done
 
+	// 6. GeoCN 补区县（放在百度之后：省市已是最终值，区县才能校验自洽）
+	if opt.GeoCN != nil {
+		g := applyGeoCN(db, segs, opt.GeoCN, opt.DryRun)
+		st.CountyFilled, st.GeoCNConflict = g.county, g.conflict
+		log.Printf("GeoCN 补区县: %d 段（省市不一致放弃 %d 段，云段跳过 %d 段）",
+			g.county, g.conflict, g.cloud)
+	}
+
 	st.Elapsed = time.Since(start)
 
 	if err := writeConflicts(opt.ConflictFile, conflicts); err != nil {
@@ -308,7 +310,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	return st, nil
 }
 
-type kindCount struct{ prov, city, isp int }
+type kindCount struct{ prov, city, isp, countyCleared int }
 type confInfo struct {
 	n      int
 	sample string
@@ -457,6 +459,9 @@ func SameGeo(a, b provider.Result) bool {
 		trimAdminSuffix(a.City) == trimAdminSuffix(b.City)
 }
 
+// SameName 比较两个行政区名，忽略 市/区/县 等后缀差异。
+func SameName(a, b string) bool { return sameName(a, b) }
+
 // sameName 比较行政区名，忽略 市/区/县 等后缀差异。
 // qqwry 存 "广州"，百度给 "广州市"，不是真实差异，不该触发全表改写。
 func sameName(a, b string) bool {
@@ -470,6 +475,20 @@ func trimAdminSuffix(s string) string {
 		}
 	}
 	return s
+}
+
+// clearCounty 在省市被改写后清空不再成立的区县/镇。
+// 稍后 GeoCN 会按新的省市重新补，所以这里只是把错的先去掉。
+func clearCounty(sg *geo.Segment, up *store.SegmentUpdate, k *kindCount) {
+	empty := ""
+	if sg.Geo.County != "" {
+		up.County = &empty
+		k.countyCleared++
+	}
+	if sg.Geo.Town != "" {
+		up.Town = &empty
+	}
+	sg.Geo.County, sg.Geo.Town = "", ""
 }
 
 // FillPair 按"省/市必须自洽"的原则补空，返回实际填了省、填了市。
@@ -542,7 +561,7 @@ func decide(segs []geo.Segment, pr *probe, res provider.Result, override bool) (
 	}
 
 	for _, idx := range pr.segIdx {
-		sg := segs[idx]
+		sg := &segs[idx]
 		up := store.SegmentUpdate{Start: sg.Start, Source: TagSource(sg.Source, "+baidu")}
 
 		provEmpty := sg.Geo.Province == ""
@@ -563,12 +582,19 @@ func decide(segs []geo.Segment, pr *probe, res provider.Result, override bool) (
 				up.City = &cv // 省变了市必须同步，否则留下跨省组合
 				k.prov++
 				k.city++
+				// 市变了，挂在旧市下的区县/镇不再成立，清掉（稍后由 GeoCN 按新省市重填）
+				if sg.Geo.City != "" && !sameName(sg.Geo.City, res.City) {
+					clearCounty(sg, &up, &k)
+				}
+				sg.Geo.Province, sg.Geo.City = pv, cv
 			case !cityEmpty && res.City != "" && res.Province != "" &&
 				sameName(sg.Geo.Province, res.Province) && !sameName(sg.Geo.City, res.City):
 				// 只换市：必须百度也给了省、且省与我们一致，否则无法验证归属
 				v := res.City
 				up.City = &v
 				k.city++
+				clearCounty(sg, &up, &k)
+				sg.Geo.City = v
 			}
 		}
 

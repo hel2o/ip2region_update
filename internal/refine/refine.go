@@ -349,6 +349,11 @@ func applyTo(res provider.Result, old geo.GeoInfo) geo.GeoInfo {
 
 	default:
 		// 三点探测一致，省市成对覆盖，天然自洽
+		if res.City != "" && !enrich.SameName(out.City, res.City) {
+			// 市变了，原区县/镇挂在旧市下，不再成立
+			out.County = ""
+			out.Town = ""
+		}
 		out.Province = res.Province
 		if res.City != "" {
 			out.City = res.City
