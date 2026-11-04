@@ -570,6 +570,12 @@ func buildRuns(sg *geo.Segment, slices []geocn.Slice, res *geocnResult, allowOve
 			push(run{start: prev, end: sl.Start - 1})
 		}
 		info := sl.Info
+		// GeoCN 只有省级编码时会把 City 填成省名（"吉林省|吉林省"），
+		// 那不是市级信息，必须清掉——否则会被当成"层级 2"参与裁决，
+		// 把省名当市名写进库（实测污染过 10.5 万段 / 1.17 亿 IP）。
+		if info.City == info.Province && !isMunicipality(info.Province) {
+			info.City = ""
+		}
 		var r run
 		r.start, r.end = sl.Start, sl.End
 		hasDist := info.HasDistrict()
@@ -625,15 +631,32 @@ func geoLevel(prov, city string) int {
 	return 0
 }
 
-// geoConsistent 判断 GeoCN 的省市与我们已有的值是否对得上（空值不参与比较）。
+// geoConsistent 判断 GeoCN 的信息能不能用在我们这个段上。
+//
+// **市优先**：中国地级市不重名，市对上了就是同一个地方，这时不该因为省的写法
+// 不同就丢掉 GeoCN 的区县。典型场景——百度把省改成了 A，而 GeoCN 的省还是旧的 B，
+// 但两边给的是同一个市，此时区县照样可用。
+//
+// 只有一方缺市时才退化为比省。
 func geoConsistent(cur geo.GeoInfo, in geocn.Info) bool {
-	if cur.Province != "" && !sameName(cur.Province, in.Province) {
-		return false
+	if cur.City != "" && in.City != "" {
+		return sameName(cur.City, in.City)
 	}
-	if cur.City != "" && !sameName(cur.City, in.City) {
+	if cur.Province != "" && in.Province != "" && !sameName(cur.Province, in.Province) {
 		return false
 	}
 	return true
+}
+
+// isMunicipality 判断直辖市/特别行政区——这类地方的省市同名是正常的，
+// 不能当成"省级编码"处理掉。
+func isMunicipality(name string) bool {
+	switch name {
+	case "北京市", "上海市", "天津市", "重庆市",
+		"香港特别行政区", "澳门特别行政区":
+		return true
+	}
+	return false
 }
 
 // applyISPTables 用运营商网段表设置 ISP。
