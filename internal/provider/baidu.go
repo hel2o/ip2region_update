@@ -47,11 +47,11 @@ func NewBaidu(timeout time.Duration, opts ...BaiduOption) *Baidu {
 		client: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
-				Proxy:           http.ProxyFromEnvironment,
-				DialContext:     (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 60 * time.Second}).DialContext,
-				MaxIdleConns:    64,
+				Proxy:               http.ProxyFromEnvironment,
+				DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 60 * time.Second}).DialContext,
+				MaxIdleConns:        64,
 				MaxIdleConnsPerHost: 32,
-				IdleConnTimeout: 90 * time.Second,
+				IdleConnTimeout:     90 * time.Second,
 			},
 		},
 	}

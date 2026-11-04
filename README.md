@@ -100,6 +100,7 @@ go build ./cmd/ip2region    # 也可以编译成单二进制
 |---|---|---|---|
 | `fetch` | 下载 `qqwry.dat` + 网段表 + GeoCN | `data/qqwry.dat`、`data/ispip/`、`data/geocn/` | 40 秒 |
 | `parse` | 解析 dat，拆省市区镇，落 SQLite | `data/ip2region.db` | 10 秒 |
+| `legacy` | 用旧版 xdb 补境外缺失的省市 | 改写段表 | 30 秒 |
 | `enrich` | 调百度补省市/ISP | 改写段表 + `ip_cache` | 首次 30 分钟，缓存后 25 秒 |
 | `refine` | 大段边界递归收敛到 /24 | 段表拆分 | 首次约 20 秒（多为缓存命中） |
 | `merge` | 叠加 `data/custom/*.txt` | `build/ip2region.txt` | 1 秒 |
@@ -170,21 +171,62 @@ go run ./cmd/ip2region parse -src data/qqwry.dat -db data/ip2region.db
 
 实测：`151 万原始记录 → 141 万段`，其中中国 19.2 万段 / 4.03 亿 IP。
 
+### legacy：把旧版 xdb 的境外省市搬回来
+
+```bash
+go run ./cmd/ip2region legacy -xdb /path/to/old.xdb            # 只补境外（默认）
+go run ./cmd/ip2region legacy -xdb old.xdb -dry-run            # 只统计
+go run ./cmd/ip2region legacy -xdb old.xdb -include-cn         # 连国内一起（不建议）
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-db` | `data/ip2region.db` | 当前库 |
+| `-xdb` | `build/compare/old.xdb` | 旧版 xdb 路径 |
+| `-include-cn` | false | 也处理中国大陆段 |
+| `-dry-run` | false | 只统计不写库 |
+
+**为什么需要它**：新版 qqwry（2026-10）把境外记录大幅简化了。同一个 IP：
+
+```
+旧库: 日本|Shimane|松江市|||Enecom,Inc.
+新库: 日本||||||Energia通讯          ← 省市没了
+```
+
+原始 dat 里确实只剩 `国家="日本" 地区="Energia通讯"`，省市不是我们丢的，是数据源没了。
+旧库那批信息只能从旧库搬。
+
+规则刻意保守：**只补空字段，绝不覆盖已有值**；默认只处理境外段。补完会按旧库的边界
+切分原段，让每片带自己那片的归属。
+
+实测：处理 26.99 万段（其中 7.5 万段被切开），补省 89.5 万处、补市 93.5 万处，
+涉及 21.5 亿 IP。境外省覆盖率 20.6% → **51.7%**，旧库有而我们没有的**全部归零**。
+
 ### enrich：百度判断省市 + 补 ISP
 
-**探测密度按段长自适应。** 一个段只探一个中点会把一个城市的结论套到整段上——
-`59.192.0.0/10`（419 万 IP）原本只探一个点。现在按段长切：
+**探测布线：GeoCN 边界优先，片内再按 IP 数等分。**
+
+按 IP 数机械等分的问题在于切点跟真实归属无关。GeoCN 的网段边界来自真实分配记录，
+在它上面布点更可能落在真实的归属变化处。实测 `111.55.0.0/16`：
 
 ```
-段长 ≤ 2048 IP        → 1 个探测点
-段长 2048~131072 IP   → 每 2048 IP 一个点
-段长 > 131072 IP      → 封顶 64 个点
+GeoCN 切出 1678 片（西宁 / 广州 / 重庆 / 南宁 混杂，每片 256 IP）
+机械等分（step 2048）只布 32 个点，绝大多数 /24 根本探不到
 ```
 
-切出的每一片独立探测、独立决策，片间结论不同就把原段切开。
+所以顺序是：
 
-实测 19.2 万中国段 → 32.9 万片 → **25.1 万个去重探测点**（按 /24 合并），
-修正省 8,615 段、修正市 48,925 段。
+```
+段 → 按 GeoCN 网段边界切 → 合并 < 2048 IP 的碎片 → 片内按 2048 等分 → 段内封顶 256 点
+```
+
+切出的每一格独立探测、独立决策，结论不同就把原段切开。GeoCN 未收录的区间保持原样。
+
+实测 19.2 万中国段 → 35.2 万片 → **27.4 万个去重探测点**（按 /24 合并），
+修正省 9,979 段、修正市 53,362 段。比纯等分多 9% 请求，但探测点落在真实网段里。
+
+> GeoCN 也有它看不出来的大段：`59.192.0.0/10`（419 万 IP）在 GeoCN 里就是一片
+> "北京市西城区"，百度 83 个探测点也全回北京。这段无解，任何数据源都认为它整段在北京。
 
 ```bash
 # 试跑，只发 200 次请求，不写段表
@@ -208,7 +250,9 @@ go run ./cmd/ip2region enrich -only-empty
 | `-ispip` | `data/ispip` | 运营商网段表目录，空串表示不用（建表前先跑 `fetch`） |
 | `-geocn` | `data/geocn/GeoCN.mmdb` | GeoCN 离线库，空串表示不补区县 |
 | `-amap-key` | `$AMAP_KEY` | 高德 Web 服务 Key，只用于补百度缺失的省市（留空不启用） |
-| `-probe-step` | 2048 | 每多少 IP 布一个探测点（0 = 退回"每段只探中点"） |
+| `-probe-step` | 2048 | 片内每多少 IP 布一个探测点（0 = 每片只探中点） |
+| `-probe-cap` | 256 | 每个段最多几个探测点，超出则整段均匀等分 |
+| `-min-piece` | 2048 | GeoCN 切片小于该值就与相邻片合并 |
 | `-probe-cap` | 64 | 每个段最多几个探测点 |
 | `-only-empty` | false | 只处理省市缺失的段 |
 | `-conflicts` | `build/enrich-conflicts.tsv` | ISP 冲突样例输出，空字符串则不写 |
@@ -683,7 +727,7 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 |---|---|---|---|
 | 省 | 95.84% | **99.08%** | qqwry + 百度补空 |
 | 市 | 81.18% | **91.54%** | qqwry + 百度补空 |
-| 区县 | 4.67% | **40.97%** | qqwry + GeoCN 按边界切分补空 |
+| 区县 | 4.67% | **41.16%** | qqwry + GeoCN 按边界切分补空 |
 | 乡镇 | 15.01% | 13.95% | 只有 qqwry 有（GeoCN 没有镇级） |
 | ISP | 85.00% | **90.48%** | qqwry + 网段表 + 百度补空 |
 
@@ -817,6 +861,7 @@ internal/qqwry/         qqwry.dat 解析（GB18030 解码、0x01/0x02 跳转）
 internal/regions/       行政区划切分、ISP 归一（含港澳台运营商）、云厂商识别、百度 location 解析
 internal/store/         SQLite：段表 / ip_cache / meta
 internal/provider/      外部数据源接口 + 百度实现
+internal/legacy/        旧版 xdb 读取（境外省市补丁）
 internal/ispip/         运营商网段表解析（APNIC 分配归属）
 internal/geocn/         GeoCN MMDB 读取 + 行政区划编码翻译
 internal/enrich/        /24 去重、限流、缓存复用、冲突裁定

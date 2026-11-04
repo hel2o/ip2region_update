@@ -120,7 +120,7 @@ func checkProvinceCity(db *store.DB, codeFile string) (string, error) {
 	}
 	defer f.Close()
 
-	provOf := map[string]string{} // 省码 → 省名
+	provOf := map[string]string{}   // 省码 → 省名
 	cityProv := map[string]string{} // 市码 → 省码
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -170,7 +170,7 @@ func checkProvinceCity(db *store.DB, codeFile string) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n省市自洽检查        : ", )
+	fmt.Fprintf(&b, "\n省市自洽检查        : ")
 	if badSeg == 0 {
 		fmt.Fprintf(&b, "通过（无跨省组合）")
 	} else {

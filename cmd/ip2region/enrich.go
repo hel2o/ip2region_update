@@ -34,7 +34,8 @@ func runEnrich(args []string) error {
 	geocnPath := fs.String("geocn", "data/geocn/GeoCN.mmdb", "GeoCN 离线库路径（空串=不补区县）")
 	amapKey := fs.String("amap-key", os.Getenv("AMAP_KEY"), "高德 Web 服务 Key（只用于补百度缺失的省市，留空则不启用）")
 	probeStep := fs.Int("probe-step", 2048, "每多少 IP 布一个探测点（0=每段只探中点）")
-	probeCap := fs.Int("probe-cap", 64, "每个段最多几个探测点（0=不封顶）")
+	probeCap := fs.Int("probe-cap", 256, "每个段最多几个探测点（0=不封顶）")
+	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就与相邻片合并（0=不合并）")
 	_ = fs.Parse(args)
 
 	m, err := parseMask(*mask)
@@ -120,6 +121,7 @@ func runEnrich(args []string) error {
 		Fallback:     fb,
 		ProbeStep:    *probeStep,
 		ProbeCap:     *probeCap,
+		MinPiece:     *minPiece,
 	})
 
 	fmt.Println("---- enrich 统计 ----")

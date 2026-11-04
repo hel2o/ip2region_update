@@ -159,7 +159,7 @@ func LoadContent(handle *os.File) ([]byte, error) {
 	}
 
 	if rLen != len(buff) {
-		return nil, fmt.Errorf("incomplete read: readed bytes should be %d, but got %d", len(buff),rLen)
+		return nil, fmt.Errorf("incomplete read: readed bytes should be %d, but got %d", len(buff), rLen)
 	}
 
 	return buff, nil

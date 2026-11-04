@@ -39,15 +39,16 @@ type Options struct {
 	Mask         uint32 // 按此掩码去重（默认 /24 = 0xFFFFFF00；传 0 表示不去重）
 	DryRun       bool   // 只统计不写库
 	Timeout      time.Duration
-	ProgressN    int    // 每 N 个 probe 打一行进度
-	ConflictFile string // 冲突样例输出路径（空则不写）
-	MaxConflicts int    // 冲突文件最多写多少行
-	Override     bool   // 是否允许覆盖已有省市（默认 false，只补空）
-	ISPTables    *ispip.Table // 运营商网段表（nil=不按网段判 ISP）
-	GeoCN        *geocn.DB    // GeoCN 离线库（nil=不补区县）
+	ProgressN    int               // 每 N 个 probe 打一行进度
+	ConflictFile string            // 冲突样例输出路径（空则不写）
+	MaxConflicts int               // 冲突文件最多写多少行
+	Override     bool              // 是否允许覆盖已有省市（默认 false，只补空）
+	ISPTables    *ispip.Table      // 运营商网段表（nil=不按网段判 ISP）
+	GeoCN        *geocn.DB         // GeoCN 离线库（nil=不补区县）
 	Fallback     provider.Provider // 备用源（高德）：只在主源没给省市时用
-	ProbeStep    int          // 每多少 IP 布一个探测点（0 = 每段只探中点）
-	ProbeCap     int          // 每个段最多探几个点（0 = 不封顶）
+	ProbeStep    int               // 每多少 IP 布一个探测点（0 = 每段只探中点）
+	ProbeCap     int               // 每个段最多探几个点（0 = 不封顶）
+	MinPiece     int               // GeoCN 切片小于该值就与相邻片合并（0 = 不合并）
 }
 
 // Stats 是执行统计。
@@ -57,20 +58,20 @@ type Stats struct {
 	CountyFilled   int // GeoCN 补的区县
 	CountyCleared  int // 因省市变更而清空的旧区县
 	GeoCNConflict  int // GeoCN 与现有省市不一致而放弃的段
-	Segments   int // 参与增强的段数（中国段）
-	Pieces     int // 按探测密度切出的片数
-	SplitSegs  int // 因片间结论不同而被切开的段数
-	Probes     int // 去重后的探测点数
-	DBHits     int // 命中 SQLite 缓存
-	Requests   int // 真实请求数
-	NoData     int
-	Errors     int
-	ProvFixed  int
-	CityFixed  int
-	ISPFilled  int
-	Conflicts  int
-	Elapsed    time.Duration
-	CursorStop uint32 // 中断时的进度游标（0 表示正常跑完）
+	Segments       int // 参与增强的段数（中国段）
+	Pieces         int // 按探测密度切出的片数
+	SplitSegs      int // 因片间结论不同而被切开的段数
+	Probes         int // 去重后的探测点数
+	DBHits         int // 命中 SQLite 缓存
+	Requests       int // 真实请求数
+	NoData         int
+	Errors         int
+	ProvFixed      int
+	CityFixed      int
+	ISPFilled      int
+	Conflicts      int
+	Elapsed        time.Duration
+	CursorStop     uint32 // 中断时的进度游标（0 表示正常跑完）
 }
 
 type probe struct {
@@ -118,7 +119,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		log.Printf("网段表定 ISP: 补空 %d 段, 纠正 %d 段", filled, fixed)
 	}
 
-	// 1. 组装 probe 列表（按段长自适应切片，再按 /24 去重）
+	// 1. 组装 probe 列表（GeoCN 边界优先切片，片内再按 IP 数等分，最后按 /24 去重）
 	byKey := map[uint32]*probe{}
 	var probes []*probe
 	for i := range segs {
@@ -127,11 +128,8 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 			continue
 		}
 		st.Segments++
-		n := probeCount(opt, sg)
-		span := uint64(sg.End) - uint64(sg.Start) + 1
-		for j := 0; j < n; j++ {
-			a := sg.Start + uint32(span*uint64(j)/uint64(n))
-			b := sg.Start + uint32(span*uint64(j+1)/uint64(n)) - 1
+		for _, cell := range planPieces(opt, sg) {
+			a, b := cell[0], cell[1]
 			ip := uint32((uint64(a) + uint64(b)) / 2)
 			key := ip & opt.Mask
 			pr, ok := byKey[key]
@@ -395,9 +393,9 @@ type confInfo struct {
 // geocnResult 是 GeoCN 预处理的统计。
 type geocnResult struct {
 	county, prov, city, conflict, cloud, split int
-	noDistrict                                  int
-	tooWide                                     int
-	overridden                                  int // 百度没给省市，改用 GeoCN 的
+	noDistrict                                 int
+	tooWide                                    int
+	overridden                                 int // 百度没给省市，改用 GeoCN 的
 }
 
 // baiduNoCity 是"百度没给出市级"的来源标记。
@@ -818,7 +816,7 @@ func fillPair(g *geo.GeoInfo, res provider.Result, k *kindCount) {
 //  3. ISP 冲突：两边都有值但不同 → 只记录不写库（qqwry 的"腾讯云/网宿"更细）
 func decidePart(base geo.GeoInfo, res provider.Result, override bool) (geo.GeoInfo, kindCount, bool) {
 	var (
-		k         kindCount
+		k           kindCount
 		ispConflict bool
 	)
 	out := base
@@ -866,7 +864,6 @@ func decidePart(base geo.GeoInfo, res provider.Result, override bool) (geo.GeoIn
 	}
 	return out, k, ispConflict
 }
-
 
 // fillFromFallback 在主数据源没给出省市时，用备用源补一次。
 //
@@ -925,28 +922,100 @@ type segAgg struct {
 	pieces []geo.Segment
 }
 
-// probeCount 决定一个段要布几个探测点。
+// planPieces 决定一个段切成哪些区间来布探测点，返回闭区间列表（覆盖整段）。
 //
-// 只探一个中点会把一个城市的结论套到整段上：一个 /10（419 万 IP）只探一个点，
-// 误差比任何数据源的问题都大。所以按段长阶梯加密：
+// **GeoCN 边界优先**：GeoCN 的网段边界来自真实分配记录，比按 IP 数机械等分更可能
+// 落在真实归属变化处。实测 `111.55.0.0/16` 在 GeoCN 里有 1678 片，涵盖西宁/广州/
+// 重庆/南宁；机械等分只会布 32 个点，绝大多数 /24 根本探不到。
 //
-//	≤ ProbeStep        → 1 个点
-//	每 ProbeStep 一个点，封顶 ProbeCap 个
-//
-// 探测点还会按 /24 去重，同一个 /24 内的多片共用一次请求。
-func probeCount(opt Options, sg *geo.Segment) int {
-	if opt.ProbeStep <= 0 {
-		return 1
+// 步骤：
+//  1. 按 GeoCN 边界切（GeoCN 未收录的空洞保留原样）
+//  2. 合并小于 MinPiece 的相邻碎片（避免大量 1~2 个 IP 的探测点）
+//  3. 每片内按 ProbeStep 继续等分
+//  4. 总片数受 ProbeCap 约束，超了就整段均匀等分
+func planPieces(opt Options, sg *geo.Segment) [][2]uint32 {
+	raw := geocnSlices(opt, sg)
+	if len(raw) == 0 {
+		raw = [][2]uint32{{sg.Start, sg.End}}
 	}
-	span := uint64(sg.End) - uint64(sg.Start) + 1
-	n := int((span + uint64(opt.ProbeStep) - 1) / uint64(opt.ProbeStep))
-	if n < 1 {
-		n = 1
+	raw = mergeSmallSlices(raw, opt.MinPiece)
+
+	var cells [][2]uint32
+	for _, p := range raw {
+		a, b := p[0], p[1]
+		span := uint64(b) - uint64(a) + 1
+		n := 1
+		if opt.ProbeStep > 0 {
+			n = int((span + uint64(opt.ProbeStep) - 1) / uint64(opt.ProbeStep))
+		}
+		if n < 1 {
+			n = 1
+		}
+		for j := 0; j < n; j++ {
+			x := a + uint32(span*uint64(j)/uint64(n))
+			y := a + uint32(span*uint64(j+1)/uint64(n)) - 1
+			cells = append(cells, [2]uint32{x, y})
+		}
 	}
-	if opt.ProbeCap > 0 && n > opt.ProbeCap {
-		n = opt.ProbeCap
+
+	// 总片数超预算：放弃 GeoCN 细分，整段均匀等分（保证每段成本有上限）
+	if opt.ProbeCap > 0 && len(cells) > opt.ProbeCap {
+		cells = cells[:0]
+		n := opt.ProbeCap
+		span := uint64(sg.End) - uint64(sg.Start) + 1
+		for j := 0; j < n; j++ {
+			x := sg.Start + uint32(span*uint64(j)/uint64(n))
+			y := sg.Start + uint32(span*uint64(j+1)/uint64(n)) - 1
+			cells = append(cells, [2]uint32{x, y})
+		}
 	}
-	return n
+	return cells
+}
+
+// geocnSlices 把段按 GeoCN 的网段边界切开，并补齐 GeoCN 未收录的空洞，
+// 保证返回的区间完整覆盖 [sg.Start, sg.End]。GeoCN 不可用时返回 nil。
+func geocnSlices(opt Options, sg *geo.Segment) [][2]uint32 {
+	if opt.GeoCN == nil {
+		return nil
+	}
+	sl := opt.GeoCN.Spans(sg.Start, sg.End)
+	if len(sl) == 0 {
+		return nil
+	}
+	out := make([][2]uint32, 0, len(sl)+2)
+	cur := sg.Start
+	for _, s := range sl {
+		if s.Start > cur {
+			out = append(out, [2]uint32{cur, s.Start - 1})
+		}
+		out = append(out, [2]uint32{s.Start, s.End})
+		cur = s.End + 1
+	}
+	if cur <= sg.End {
+		out = append(out, [2]uint32{cur, sg.End})
+	}
+	return out
+}
+
+// mergeSmallSlices 把相邻的、都小于 minPiece 的碎片合并，避免探测点密度失真。
+func mergeSmallSlices(ps [][2]uint32, minPiece int) [][2]uint32 {
+	if minPiece <= 0 || len(ps) < 2 {
+		return ps
+	}
+	out := make([][2]uint32, 0, len(ps))
+	for _, p := range ps {
+		if n := len(out); n > 0 {
+			last := &out[n-1]
+			size := int64(p[1]) - int64(p[0]) + 1
+			lastSize := int64((*last)[1]) - int64((*last)[0]) + 1
+			if size < int64(minPiece) && lastSize < int64(minPiece) && (*last)[1]+1 == p[0] {
+				(*last)[1] = p[1]
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // flushSegs 把累积的片写回库。

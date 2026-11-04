@@ -21,10 +21,10 @@ var webFS embed.FS
 
 // lookupItem 是一条查询结果。
 type lookupItem struct {
-	Query    string `json:"query"`              // 用户输入的原始串
-	IP       string `json:"ip"`                 // 实际查询的 IP
-	OK       bool   `json:"ok"`                 // 是否查到
-	Err      string `json:"err,omitempty"`      // 出错原因
+	Query    string `json:"query"`         // 用户输入的原始串
+	IP       string `json:"ip"`            // 实际查询的 IP
+	OK       bool   `json:"ok"`            // 是否查到
+	Err      string `json:"err,omitempty"` // 出错原因
 	Country  string `json:"country,omitempty"`
 	Province string `json:"province,omitempty"`
 	City     string `json:"city,omitempty"`

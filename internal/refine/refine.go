@@ -32,17 +32,17 @@ import (
 
 // Options 控制细分行为。
 type Options struct {
-	Threshold  int           // 只处理长度 >= 该值的段（默认 4096，即 /20）
-	MinSpan    int           // 收敛到这个粒度就停（默认 256，即 /24）
-	MaxDepth   int           // 递归深度安全阀（默认 20）
-	SegProbes  int           // 单个段最多探测几次（默认 128，防止复杂段烧请求）
-	QPS        int           // 全局请求速率上限
-	Workers    int           // 并发处理的段数
-	Limit      int           // 最大请求数（0=不限）
-	DryRun     bool          // 只统计不写库
-	ProgressN  int           // 每 N 个段打进度
-	OnlyEmpty  bool          // 只处理省市为空的段（--only-empty）
-	ReportFile string        // 细分明细输出
+	Threshold  int    // 只处理长度 >= 该值的段（默认 4096，即 /20）
+	MinSpan    int    // 收敛到这个粒度就停（默认 256，即 /24）
+	MaxDepth   int    // 递归深度安全阀（默认 20）
+	SegProbes  int    // 单个段最多探测几次（默认 128，防止复杂段烧请求）
+	QPS        int    // 全局请求速率上限
+	Workers    int    // 并发处理的段数
+	Limit      int    // 最大请求数（0=不限）
+	DryRun     bool   // 只统计不写库
+	ProgressN  int    // 每 N 个段打进度
+	OnlyEmpty  bool   // 只处理省市为空的段（--only-empty）
+	ReportFile string // 细分明细输出
 }
 
 // Stats 是执行统计。

@@ -44,7 +44,7 @@ type DB struct {
 	// 区间索引：按 Start 升序、互不重叠，用于"按区间枚举"（补区县时要把
 	// 一个大段按 GeoCN 的网段边界切开，单点查询做不到）。
 	spans    []span
-	infoOf   []Info          // 与 codeList 一一对应，避免每次查询重算省市名
+	infoOf   []Info // 与 codeList 一一对应，避免每次查询重算省市名
 	codeList []string
 	codeSeen map[string]int
 }
@@ -124,7 +124,6 @@ func (d *DB) resolve(code, isp string) Info {
 	}
 	return info
 }
-
 
 // BuildIndex 建立区间索引。调用一次后 Spans 才可用。
 //

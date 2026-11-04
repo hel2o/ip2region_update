@@ -121,27 +121,58 @@ func TestDecidePart(t *testing.T) {
 	})
 }
 
-func TestProbeCount(t *testing.T) {
+func TestPlanPiecesWithoutGeoCN(t *testing.T) {
 	opt := Options{ProbeStep: 4096, ProbeCap: 16}
 	cases := []struct {
 		start, end uint32
 		want       int
 	}{
-		{0, 255, 1},        // 一个 /24，1 个点
-		{0, 4095, 1},       // 正好一步
-		{0, 4096, 2},       // 多一个 IP 就两片
-		{0, 65535, 16},     // /16 → 16 片（封顶）
+		{0, 255, 1},         // 一个 /24
+		{0, 4095, 1},        // 正好一步
+		{0, 4096, 2},        // 多一个 IP 就两片
+		{0, 65535, 16},      // /16 → 16 片（封顶）
 		{0, 0xFFFFFFFF, 16}, // 全域 → 仍然 16 片
 	}
 	for _, c := range cases {
 		sg := geo.Segment{Start: c.start, End: c.end}
-		if got := probeCount(opt, &sg); got != c.want {
-			t.Errorf("probeCount(%d-%d)=%d want %d", c.start, c.end, got, c.want)
+		got := planPieces(opt, &sg)
+		if len(got) != c.want {
+			t.Errorf("planPieces(%d-%d)=%d 片 want %d", c.start, c.end, len(got), c.want)
+		}
+		// 必须完整覆盖，不重不漏
+		if got[0][0] != c.start || got[len(got)-1][1] != c.end {
+			t.Errorf("覆盖范围不对: %v ~ %v", got[0], got[len(got)-1])
+		}
+		for i := 1; i < len(got); i++ {
+			if got[i][0] != got[i-1][1]+1 {
+				t.Errorf("第 %d 片与前一片不连续: %v / %v", i, got[i-1], got[i])
+			}
 		}
 	}
 	// ProbeStep=0 表示退回"每段一个中点"
-	if got := probeCount(Options{}, &geo.Segment{Start: 0, End: 0xFFFFFF}); got != 1 {
-		t.Errorf("未设步长时应只探一个点，实际 %d", got)
+	if got := planPieces(Options{}, &geo.Segment{Start: 0, End: 0xFFFFFF}); len(got) != 1 {
+		t.Errorf("未设步长时应只探一个点，实际 %d 片", len(got))
+	}
+}
+
+func TestMergeSmallSlices(t *testing.T) {
+	in := [][2]uint32{{0, 1}, {2, 3}, {4, 100}, {101, 102}, {103, 5000}}
+	// 前两片都 < 2048 且相邻 → 合并；第三片 97 个也小，但与已合并的连一起继续合
+	out := mergeSmallSlices(in, 2048)
+	if len(out) == 0 {
+		t.Fatal("不该为空")
+	}
+	if out[0][0] != 0 {
+		t.Fatalf("起点应保持 0: %v", out[0])
+	}
+	// 覆盖必须完整
+	if out[0][0] != 0 || out[len(out)-1][1] != 5000 {
+		t.Fatalf("覆盖不完整: %v ~ %v", out[0], out[len(out)-1])
+	}
+	for i := 1; i < len(out); i++ {
+		if out[i][0] != out[i-1][1]+1 {
+			t.Fatalf("不连续: %v / %v", out[i-1], out[i])
+		}
 	}
 }
 
@@ -159,9 +190,9 @@ func TestTrimAdminSuffix(t *testing.T) {
 
 func TestFillPairKeepsProvinceCityConsistent(t *testing.T) {
 	cases := []struct {
-		name             string
-		prov, city       string
-		resProv, resCity string
+		name               string
+		prov, city         string
+		resProv, resCity   string
 		wantProv, wantCity string
 	}{
 		{"省有市空且百度省不一致：不填市", "江西省", "", "广东省", "广州市", "江西省", ""},

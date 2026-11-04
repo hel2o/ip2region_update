@@ -4,8 +4,8 @@ import "testing"
 
 func TestParseLocation(t *testing.T) {
 	cases := []struct {
-		in                                     string
-		country, prov, city, county, isp        string
+		in                               string
+		country, prov, city, county, isp string
 	}{
 		{"广东省广州市 电信", "中国", "广东省", "广州市", "", "中国电信"},
 		{"江苏省南京市 电信", "中国", "江苏省", "南京市", "", "中国电信"},

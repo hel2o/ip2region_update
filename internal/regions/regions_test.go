@@ -43,7 +43,7 @@ func TestSplitTypical(t *testing.T) {
 
 func TestSplitDashed(t *testing.T) {
 	cases := []struct {
-		in                            string
+		in                                string
 		country, prov, city, county, town string
 	}{
 		{"中国–福建", "中国", "福建省", "", "", ""},
@@ -83,14 +83,14 @@ func TestSplitForeign(t *testing.T) {
 
 func TestNormalizeISP(t *testing.T) {
 	cases := map[string]string{
-		"电信":       "中国电信",
-		"中国电信":     "中国电信",
-		"联通":       "中国联通",
-		"网通":       "中国联通",
-		"移动":       "中国移动",
-		"铁通":       "中国铁通",
+		"电信":         "中国电信",
+		"中国电信":       "中国电信",
+		"联通":         "中国联通",
+		"网通":         "中国联通",
+		"移动":         "中国移动",
+		"铁通":         "中国铁通",
 		"教育网/CERNET": "教育网",
-		"BGP多线":    "BGP多线",
+		"BGP多线":      "BGP多线",
 	}
 	for in, want := range cases {
 		got, ok := NormalizeISP(in)

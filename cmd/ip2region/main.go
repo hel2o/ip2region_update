@@ -18,6 +18,7 @@ const usage = `ip2region 构建工具
   parse     解析 qqwry.dat，规范化后写入 SQLite 段表
   enrich    调百度接口纠正省市与 ISP（带缓存、限流、断点续跑）
   refine    对大段做二分收敛细分
+  legacy    用旧版 xdb 补当前库缺失的境外省市
   merge     叠加自定义 CIDR 覆盖，输出最终 txt
   build     调 xdb maker 生成 .xdb
   verify    校验段表连续性/全覆盖，并与参考 xdb 抽样对拍
@@ -45,6 +46,8 @@ func main() {
 		err = runParse(args)
 	case "enrich":
 		err = runEnrich(args)
+	case "legacy":
+		err = runLegacy(args)
 	case "refine":
 		err = runRefine(args)
 	case "merge":
@@ -83,8 +86,3 @@ func newFlagSet(name, desc string) *flag.FlagSet {
 func notImplemented(phase string) error {
 	return fmt.Errorf("尚未实现（计划在 %s）", phase)
 }
-
-
-
-
-
