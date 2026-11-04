@@ -129,6 +129,8 @@ go run ./cmd/ip2region all                # 或 build/ip2region all
 > 注意：`all` 里的 `parse` 会重建段表（等于清空后重灌），自定义覆盖在 `merge` 阶段
 > 重新叠加，所以不用担心丢规则；但**手工改过 SQLite 段表**的话会被覆盖，改完请另行备份。
 
+出库后要推到各项目用，接着跑 `./sync.sh`（见[发布更新](#推到-9926-上的四个项目)）。
+
 ---
 
 
@@ -712,6 +714,38 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 
 替换 xdb 文件后重启进程即可。用 `NewWithBuffer` 把文件读进内存的方式，必须重启才会重新加载。
 
+### 推到 99.26 上的四个项目
+
+`sync.sh`（Windows 用 `sync.bat`）把 `build/ip2region.xdb` 同步到内网构建机
+`192.168.99.26` 的四份副本：
+
+| 目标 |
+|---|
+| `/home/work/management-system/xdb/ip2region.xdb` |
+| `/home/work/workspace/src/github.com/hel2o/management-system/xdb/ip2region.xdb` |
+| `/home/work/workspace/src/github.com/hel2o/sniffer/ip2region.xdb` |
+| `/home/work/workspace/src/github.com/hel2o/english_school/ip2region.xdb` |
+
+```bash
+./sync.sh              # 全部同步
+./sync.sh -n           # dry-run：只比 md5，报「已是同一版本 / 将更新 / 目标不存在」
+./sync.sh -src build/test.xdb   # 换源文件
+./sync.sh -keep 5      # 每个目标保留 5 份历史备份（默认 3）
+```
+
+实现要点（都是为了避免线上读到半截文件）：
+
+- **只上传一次**：先 `scp` 到远端 `/tmp/ip2region.<md5>.xdb`，再在远端 `cp` 到四个目标。
+  同 md5 的临时文件已存在时连上传都跳过（重复跑几乎瞬时）。
+- **跳过同版本**：目标 md5 已经等于源 md5 就直接报「最新」，不产生备份垃圾。
+- **原子替换**：写同目录的 `ip2region.xdb.tmp.<pid>`，`chown`/`chmod` 对齐旧文件后 `mv -f`，
+  不会出现读到写一半的情况。
+- **自动备份**：覆盖前 `cp -p` 成 `ip2region.xdb.bak.<时间戳>`，每个目标只留最近 `-keep` 份。
+- **回读校验**：每个目标传完重新 `md5sum` 比对，不一致退出码非 0。
+- **防呆**：源文件小于 5MB 直接拒绝推（半截文件/空占位别砸线上）。
+
+脚本只动文件，**不重启任何服务**；跑着的进程不支持热加载的话要自己 restart。
+
 ---
 
 ## 自定义覆盖规则
@@ -940,6 +974,8 @@ _legacy/                旧实现归档，不参与编译（不进 git）
 
 rebuild.bat             Windows 一键重建（双击可用）
 rebuild.sh              Linux/macOS 一键重建
+sync.bat                Windows 一键同步到 99.26（双击可用）
+sync.sh                 同步 xdb 到 99.26 上的四个项目目录
 ```
 
 ---
