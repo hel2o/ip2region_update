@@ -4,6 +4,7 @@ REM  ip2region one-click rebuild
 REM    rebuild.bat                            full rebuild (fetch + enrich + refine)
 REM    rebuild.bat -skip-fetch                reuse local data, no download
 REM    rebuild.bat -skip-enrich -skip-refine  re-assemble only, no network
+REM    rebuild.bat -only-custom               only data\custom\*.txt changed: merge + build (no parse)
 REM  Output: build\ip2region.xdb
 REM  Keep this file ASCII-only: cmd parses it with the OEM codepage.
 REM ============================================================

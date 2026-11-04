@@ -26,6 +26,10 @@ type allStep struct {
 //	8 verify  校验全覆盖 + 与 golden 对拍
 //	9 stats   字段覆盖率报表
 //
+// 加了 -only-custom 时只跑 6~7 两步：段表原样复用，不下载、不增强、不收敛。
+// 只改了 data/custom/*.txt 的场合必须走这个模式，否则 parse 会重灌段表，
+// 把百度/GeoCN 的增强结果洗掉。
+//
 // 重复跑很便宜：enrich/refine 的请求缓存按 /24 存在 SQLite 里，
 // 数据没变时第二次跑几乎零请求。
 func runAll(args []string) error {
@@ -44,15 +48,25 @@ func runAll(args []string) error {
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就合并")
 
 	verifyN := fs.Int("verify-n", 100000, "verify 对拍抽样 IP 数（0 = 跳过对拍）")
+	onlyCustom := fs.Bool("only-custom", false, "只重跑 merge + build（仅改了 data/custom/*.txt 时用，不碰段表）")
 	skipFetch := fs.Bool("skip-fetch", false, "跳过下载（用本地已有数据）")
 	skipLegacy := fs.Bool("skip-legacy", false, "跳过旧库境外补丁")
 	skipEnrich := fs.Bool("skip-enrich", false, "跳过百度增强")
 	skipRefine := fs.Bool("skip-refine", false, "跳过边界收敛")
 	_ = fs.Parse(args)
 
+	// 只改自定义覆盖时，parse 会重灌段表、把百度/GeoCN 的增强结果洗掉，
+	// 所以这个模式下强制跳过所有写段表的步骤，只留 merge + build。
+	if *onlyCustom {
+		*skipFetch, *skipLegacy, *skipEnrich, *skipRefine = true, true, true, true
+	}
+
 	start := time.Now()
 	fmt.Printf("==== 一键重建 xdb ====\n")
 	fmt.Printf("库: %s\n输出: %s\n", *dbPath, *xdbOut)
+	if *onlyCustom {
+		fmt.Printf("模式: 只更新自定义覆盖（复用段表，只跑 merge + build）\n")
+	}
 
 	var steps []allStep
 
@@ -67,9 +81,11 @@ func runAll(args []string) error {
 		}})
 	}
 
-	steps = append(steps, allStep{"解析 qqwry → 段表", func() error {
-		return runParse([]string{"-db", *dbPath})
-	}})
+	if !*onlyCustom {
+		steps = append(steps, allStep{"解析 qqwry → 段表", func() error {
+			return runParse([]string{"-db", *dbPath})
+		}})
+	}
 
 	if !*skipLegacy {
 		if fi, err := os.Stat(*legacyXdb); err == nil && !fi.IsDir() {
@@ -115,17 +131,23 @@ func runAll(args []string) error {
 		allStep{"生成 xdb", func() error {
 			return runBuild([]string{"-from", "txt", "-src", *txtOut, "-out", *xdbOut})
 		}},
-		allStep{"校验（全覆盖 + 对拍）", func() error {
-			a := []string{"-db", *dbPath, "-n", strconv.Itoa(*verifyN), "-sample", "false"}
-			if *verifyN <= 0 {
-				a = append(a, "-golden", "")
-			}
-			return runVerify(a)
-		}},
-		allStep{"覆盖率报表", func() error {
-			return runStats([]string{"-db", *dbPath})
-		}},
 	)
+
+	// 段表没动过，verify / stats 读的都是 SQLite 中间表，这时跑没有意义
+	if !*onlyCustom {
+		steps = append(steps,
+			allStep{"校验（全覆盖 + 对拍）", func() error {
+				a := []string{"-db", *dbPath, "-n", strconv.Itoa(*verifyN), "-sample", "false"}
+				if *verifyN <= 0 {
+					a = append(a, "-golden", "")
+				}
+				return runVerify(a)
+			}},
+			allStep{"覆盖率报表", func() error {
+				return runStats([]string{"-db", *dbPath})
+			}},
+		)
+	}
 
 	total := len(steps)
 	for i, st := range steps {

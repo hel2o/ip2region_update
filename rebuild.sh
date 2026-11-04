@@ -4,6 +4,7 @@
 #   ./rebuild.sh                            全量重建（下载 + 百度增强 + 收敛）
 #   ./rebuild.sh -skip-fetch                用本地已有数据，不下载
 #   ./rebuild.sh -skip-enrich -skip-refine  只重排数据，不出网（30 秒级）
+#   ./rebuild.sh -only-custom               只改了 data/custom/*.txt：只跑 merge + build（约 25 秒）
 #
 # 产物：build/ip2region.xdb
 
