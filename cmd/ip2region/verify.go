@@ -56,6 +56,11 @@ func runVerify(args []string) error {
 	if n := countWatermarks(segs); n > 0 {
 		fmt.Printf("!! CZ88 水印残留    : %d 段（merge 时会自动清除，建议重跑 merge+build）\n", n)
 	}
+	// 省==市 在段表里是正常状态（直辖市/特区，enrich 比层级时要用），
+	// 去重发生在 merge 出口，所以这里只提示不告警。
+	if n := countDuplicateLevels(segs); n > 0 {
+		fmt.Printf("段表同名层级        : %d 段（直辖市/特区等，merge 输出时自动去重）\n", n)
+	}
 
 	if *sample {
 		testIPs := []string{

@@ -57,6 +57,14 @@ func runMerge(args []string) error {
 	if err := geo.Validate(merged); err != nil {
 		return fmt.Errorf("合并结果校验失败: %w", err)
 	}
+	// merge 是成品 txt 的唯一出口，这里做硬断言：出去的数据不允许带水印或重复层级。
+	// 一旦新数据源/自定义覆盖又带进来，构建会直接失败而不是悄悄落库。
+	if n := countWatermarks(merged); n > 0 {
+		return fmt.Errorf("合并结果仍有 %d 段带 CZ88 水印，清洗规则漏了", n)
+	}
+	if n := countDuplicateLevels(merged); n > 0 {
+		return fmt.Errorf("合并结果仍有 %d 段省市/市区同名，清洗规则漏了", n)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
 		return err

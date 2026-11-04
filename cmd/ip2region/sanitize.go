@@ -45,6 +45,20 @@ func sanitizeSegments(segs []geo.Segment) int {
 	return n
 }
 
+// countDuplicateLevels 统计还存在重复层级的段数（verify 用来防回归）。
+// 判断条件必须和 cleanGeo 的清空规则一致，否则会误报/漏报。
+func countDuplicateLevels(segs []geo.Segment) int {
+	n := 0
+	for _, s := range segs {
+		g := s.Geo
+		if (g.City != "" && (g.City == g.Province || g.City == g.County)) ||
+			(g.County != "" && g.County == g.Province) {
+			n++
+		}
+	}
+	return n
+}
+
 // countWatermarks 统计还带 CZ88 水印的段数（verify 用来防回归）。
 func countWatermarks(segs []geo.Segment) int {
 	n := 0
