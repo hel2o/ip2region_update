@@ -129,6 +129,24 @@ go run ./cmd/ip2region all                # 或 build/ip2region all
 > 注意：`all` 里的 `parse` 会重建段表（等于清空后重灌），自定义覆盖在 `merge` 阶段
 > 重新叠加，所以不用担心丢规则；但**手工改过 SQLite 段表**的话会被覆盖，改完请另行备份。
 
+#### 只改了 `data/custom/*.txt`（不动数据源）
+
+改完自定义覆盖不需要重跑整条流水线，**别跑 `parse`**——它会重灌段表，而百度/GeoCN
+的增强结果只在段表里，跳过 enrich 就等于全丢。只要这两步：
+
+```bash
+./build/ip2region.exe merge          # 叠加自定义覆盖 → build/ip2region.txt（约 2 秒）
+./build/ip2region.exe build -from txt  # 重建 xdb（约 19 秒）
+./sync.sh                            # 推到 99.26（可选）
+```
+
+用 `go run ./cmd/ip2region merge` 也一样，只是多一次编译。全程约 30 秒，不联网，
+也不覆盖段表。想确认改动生效，`verify` 或 `look <IP>` 查一下自定义范围内的地址即可。
+
+> xdb 头部第 5~8 字节是**生成时间戳**，所以同样的数据每次 build 出来的 md5 都不同
+> （字节级比对只差这 1 个字节），不要用 md5 判断数据是否变化。
+
+
 出库后要推到各项目用，接着跑 `./sync.sh`（见[发布更新](#推到-9926-上的四个项目)）。
 
 ---
