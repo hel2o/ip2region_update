@@ -14,6 +14,7 @@ const usage = `ip2region 构建工具
 用法: ip2region <command> [flags]
 
 命令:
+  all       一键重建：fetch → parse → legacy → enrich → refine → merge → build → verify → stats
   fetch     下载最新 qqwry.dat 到 data/qqwry.dat
   parse     解析 qqwry.dat，规范化后写入 SQLite 段表
   enrich    调百度接口纠正省市与 ISP（带缓存、限流、断点续跑）
@@ -40,6 +41,8 @@ func main() {
 
 	var err error
 	switch cmd {
+	case "all":
+		err = runAll(args)
 	case "fetch":
 		err = runFetch(args)
 	case "parse":

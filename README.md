@@ -18,6 +18,7 @@ $ ip2region look --xdb build/ip2region.xdb 183.3.149.185
 ## 目录
 
 - [快速开始](#快速开始)
+- [一键重建](#一键重建)
 - [环境要求](#环境要求)
 - [命令总览](#命令总览)
 - [流水线详解](#流水线详解)
@@ -79,7 +80,57 @@ go run ./cmd/ip2region verify -n 50000
 
 ---
 
-## 环境要求
+## 一键重建
+
+日常出库只需要一条命令，内部就是按顺序跑完 9 步（fetch → parse → legacy → enrich →
+refine → merge → build → verify → stats），任一步失败立即停下并报出是第几步。
+
+Windows（双击或命令行）：
+
+```bat
+rebuild.bat
+```
+
+Linux / macOS / Git Bash：
+
+```bash
+./rebuild.sh
+```
+
+两个脚本都只是「编译 + 调 `all`」，所以要定制参数就直接往后传：
+
+```bash
+./rebuild.sh -skip-fetch                  # 不下载，用本地已有数据
+./rebuild.sh -skip-enrich -skip-refine    # 只重排数据，完全不出网（30 秒）
+./rebuild.sh -qps 120 -workers 16         # 加大并发
+./rebuild.sh -out build/test.xdb          # 输出到别处，先小规模验证
+```
+
+等价于直接调二进制：
+
+```bash
+go run ./cmd/ip2region all                # 或 build/ip2region all
+```
+
+`all` 的关键行为：
+
+| 行为 | 说明 |
+|---|---|
+| 下载失败不中断 | 拿不到新 qqwry.dat 就用本地已有的，只是数据不新（日志会打 `!! 下载失败`） |
+| 旧库补丁可缺省 | `build/compare/old.xdb` 不存在就跳过 legacy，不报错 |
+| 重跑很便宜 | enrich/refine 的请求缓存按 /24 存在 SQLite 的 `ip_cache` 表，数据没变时第二次跑几乎零请求 |
+| 缓存即断点 | 中途 Ctrl+C 后重跑，已请求过的网段直接命中缓存 |
+| 结尾给摘要 | 输出文件大小、md5、总耗时，md5 可直接填进发布说明 |
+
+常用开关：`-skip-fetch`、`-skip-legacy`、`-skip-enrich`、`-skip-refine`、`-verify-n 0`
+（跳过对拍）、`-db` / `-txt` / `-out`（换路径）、`-qps` / `-workers`（限速与并发）。
+`all -h` 看全部。
+
+> 注意：`all` 里的 `parse` 会重建段表（等于清空后重灌），自定义覆盖在 `merge` 阶段
+> 重新叠加，所以不用担心丢规则；但**手工改过 SQLite 段表**的话会被覆盖，改完请另行备份。
+
+---
+
 
 - Go 1.26（见 `go.mod`）。下限被 `modernc.org/sqlite` 和 `golang.org/x/text` 拉高了，
   想降到更低版本需要同时降这两个依赖
@@ -98,6 +149,7 @@ go build ./cmd/ip2region    # 也可以编译成单二进制
 
 | 命令 | 作用 | 产物 | 耗时（实测） |
 |---|---|---|---|
+| `all` | 一键跑完整条流水线（下面 9 步按序） | `build/ip2region.xdb` | 首次 30~60 分钟，缓存后 1 分钟 |
 | `fetch` | 下载 `qqwry.dat` + 网段表 + GeoCN | `data/qqwry.dat`、`data/ispip/`、`data/geocn/` | 40 秒 |
 | `parse` | 解析 dat，拆省市区镇，落 SQLite | `data/ip2region.db` | 10 秒 |
 | `legacy` | 用旧版 xdb 补境外缺失的省市 | 改写段表 | 30 秒 |
@@ -470,7 +522,7 @@ go run ./cmd/ip2region refine -limit 100 -dry-run    # 试跑
 "北京市"。查过缓存：这段的 83 个探测点，百度全部返回 `北京市北京市` ——
 整个区间没有变化点，递归收敛无从下手。这是数据源的天花板，不是算法问题。
 
-### merge：叠加自定义覆盖### merge：叠加自定义覆盖
+### merge：叠加自定义覆盖
 
 ```bash
 go run ./cmd/ip2region merge
@@ -628,7 +680,10 @@ xdb 产物放在独立仓库 `ip2region_update`（`ip2region_update/` 目录，�
 ### 一次完整更新
 
 ```bash
-# ① 在源码仓库生成
+# ① 在源码仓库生成（等价于一条 ./rebuild.sh，下面展开写便于定位问题）
+./rebuild.sh                            # = fetch → parse → legacy → enrich → refine → merge → build → verify → stats
+
+# 也可以逐步跑，方便单步调参：
 go run ./cmd/ip2region fetch            # 打印数据版本号，例如 20261028
 go run ./cmd/ip2region parse
 go run ./cmd/ip2region enrich -qps 60
@@ -845,6 +900,7 @@ A：可以人工抽查。冲突样例在 `build/enrich-conflicts.tsv`，觉得�
 
 ```
 cmd/ip2region/          唯一入口，子命令分发
+  all.go                一键流水线（按序调下面各步）
   fetch.go              下载 qqwry.dat
   parse.go              解析落库
   enrich.go             百度补空
@@ -881,6 +937,9 @@ build/                  产物目录（不进 git）
 
 testdata/golden/        旧版 xdb，作回归对拍基准（不进 git）
 _legacy/                旧实现归档，不参与编译（不进 git）
+
+rebuild.bat             Windows 一键重建（双击可用）
+rebuild.sh              Linux/macOS 一键重建
 ```
 
 ---
