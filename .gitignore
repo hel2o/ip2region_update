@@ -7,3 +7,4 @@ data/*.db-*
 /ip2region.exe
 testdata/golden/
 ip2region_update/
+data/ispip/

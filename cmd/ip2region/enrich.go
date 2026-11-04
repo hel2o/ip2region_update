@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hel2o/ip2region/internal/enrich"
+	"github.com/hel2o/ip2region/internal/ispip"
 	"github.com/hel2o/ip2region/internal/provider"
 	"github.com/hel2o/ip2region/internal/store"
 )
@@ -27,6 +28,7 @@ func runEnrich(args []string) error {
 	progressN := fs.Int("progress", 2000, "每 N 条打进度")
 	conflictFile := fs.String("conflicts", "build/enrich-conflicts.tsv", "冲突样例输出（空则不写）")
 	override := fs.Bool("override", false, "允许用百度覆盖已有省市（默认只补空）")
+	ispDir := fs.String("ispip", "data/ispip", "运营商网段表目录（空串=不用）")
 	_ = fs.Parse(args)
 
 	m, err := parseMask(*mask)
@@ -48,6 +50,21 @@ func runEnrich(args []string) error {
 		return fmt.Errorf("段表为空，请先执行 parse")
 	}
 
+	var ispTables *ispip.Table
+	if *ispDir != "" {
+		if _, statErr := os.Stat(*ispDir); statErr == nil {
+			ispTables, err = ispip.LoadDir(*ispDir)
+			if err != nil {
+				return err
+			}
+			log.Printf("运营商网段表: %d 个文件 / %d 条 CIDR / 合并后 %d 段 / 覆盖 %.1f%% 全域",
+				ispTables.Files, ispTables.Networks, ispTables.PieceCount(),
+				float64(ispTables.Covered)/4294967296*100)
+		} else {
+			log.Printf("网段表目录 %s 不存在，跳过按网段判 ISP", *ispDir)
+		}
+	}
+
 	p := provider.NewBaidu(*timeout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -66,6 +83,7 @@ func runEnrich(args []string) error {
 		ProgressN:    *progressN,
 		ConflictFile: *conflictFile,
 		Override:     *override,
+		ISPTables:    ispTables,
 	})
 
 	fmt.Println("---- enrich 统计 ----")
@@ -77,7 +95,9 @@ func runEnrich(args []string) error {
 	fmt.Printf("  失败              : %d\n", st.Errors)
 	fmt.Printf("修正省              : %d\n", st.ProvFixed)
 	fmt.Printf("修正市              : %d\n", st.CityFixed)
-	fmt.Printf("填充 ISP            : %d\n", st.ISPFilled)
+	fmt.Printf("填充 ISP（百度）    : %d\n", st.ISPFilled)
+	fmt.Printf("补 ISP（网段表）    : %d\n", st.ISPFilledByNet)
+	fmt.Printf("纠 ISP（网段表）    : %d\n", st.ISPFixedByNet)
 	fmt.Printf("ISP 冲突(仅记录)    : %d\n", st.Conflicts)
 	fmt.Printf("耗时                : %s\n", st.Elapsed.Round(time.Millisecond))
 

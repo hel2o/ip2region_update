@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/hel2o/ip2region/internal/geo"
+	"github.com/hel2o/ip2region/internal/ispip"
 	"github.com/hel2o/ip2region/internal/provider"
 	"github.com/hel2o/ip2region/internal/regions"
 	"github.com/hel2o/ip2region/internal/store"
@@ -41,10 +42,13 @@ type Options struct {
 	ConflictFile string // 冲突样例输出路径（空则不写）
 	MaxConflicts int    // 冲突文件最多写多少行
 	Override     bool   // 是否允许覆盖已有省市（默认 false，只补空）
+	ISPTables    *ispip.Table // 运营商网段表（nil=不按网段判 ISP）
 }
 
 // Stats 是执行统计。
 type Stats struct {
+	ISPFilledByNet int // 网段表补充的 ISP
+	ISPFixedByNet  int // 网段表纠正的 ISP（云/IDC 优先）
 	Segments   int // 参与增强的段数（中国段）
 	Probes     int // 去重后的探测点数
 	DBHits     int // 命中 SQLite 缓存
@@ -85,6 +89,16 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	}
 
 	var st Stats
+
+	// 0. 先用运营商网段表定 ISP（分配归属，比百度可靠）
+	if opt.ISPTables != nil {
+		filled, fixed, err := applyISPTables(db, segs, opt.ISPTables, opt.DryRun)
+		if err != nil {
+			return st, err
+		}
+		st.ISPFilledByNet, st.ISPFixedByNet = filled, fixed
+		log.Printf("网段表定 ISP: 补空 %d 段, 纠正 %d 段", filled, fixed)
+	}
 
 	// 1. 组装 probe 列表（按 /24 去重）
 	byKey := map[uint32]*probe{}
@@ -286,6 +300,62 @@ type kindCount struct{ prov, city, isp int }
 type confInfo struct {
 	n      int
 	sample string
+}
+
+// applyISPTables 用运营商网段表设置 ISP。
+//
+// 规则：
+//   - ISP 为空 → 直接填
+//   - 网段表判定为云/IDC（优先级 >= 30）且当前是基础运营商 → 纠正
+//     （分配方比转售线路更准确，如长城宽带的段租给腾讯云）
+//   - 其余情况不动（运营商之间互换歧义大，不做判断）
+func applyISPTables(db *store.DB, segs []geo.Segment, t *ispip.Table, dryRun bool) (filled, fixed int, err error) {
+	var batch []store.SegmentUpdate
+	flush := func() error {
+		if dryRun || len(batch) == 0 {
+			batch = batch[:0]
+			return nil
+		}
+		if e := db.UpdateSegments(batch); e != nil {
+			return e
+		}
+		batch = batch[:0]
+		return nil
+	}
+
+	for i := range segs {
+		sg := &segs[i]
+		if sg.Geo.Country != "中国" {
+			continue
+		}
+		// 必须用 uint64 求和：Start+End 会溢出 uint32（起点 >= 128.0.0.0 的段全中招）
+		mid := uint32((uint64(sg.Start) + uint64(sg.End)) / 2)
+		op := t.Lookup(mid)
+		if op == "" {
+			continue
+		}
+		if sg.Geo.ISP == "" {
+			v := op
+			batch = append(batch, store.SegmentUpdate{
+				Start: sg.Start, ISP: &v, Source: TagSource(sg.Source, "+ispip"),
+			})
+			sg.Geo.ISP = op
+			filled++
+		} else if ispip.Priority(op) >= 30 && ispip.Priority(sg.Geo.ISP) < 30 {
+			v := op
+			batch = append(batch, store.SegmentUpdate{
+				Start: sg.Start, ISP: &v, Source: TagSource(sg.Source, "+ispip"),
+			})
+			sg.Geo.ISP = op
+			fixed++
+		}
+		if len(batch) >= 5000 {
+			if e := flush(); e != nil {
+				return filled, fixed, e
+			}
+		}
+	}
+	return filled, fixed, flush()
 }
 
 // TagSource 在来源串上追加标记，已存在则不重复添加。

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/hel2o/ip2region/internal/ispip"
 )
 
 const (
@@ -25,10 +27,21 @@ const (
 func runFetch(args []string) error {
 	fs := newFlagSet("fetch", "下载最新 qqwry.dat")
 	out := fs.String("out", "data/qqwry.dat", "保存路径")
+	ispDir := fs.String("ispip", "data/ispip", "运营商网段表目录（空串=不下）")
+	skipQqwry := fs.Bool("skip-qqwry", false, "跳过 qqwry.dat 下载")
 	force := fs.Bool("force", false, "即使内容相同也重写")
 	_ = fs.Parse(args)
 
 	client := &http.Client{Timeout: 3 * time.Minute}
+
+	if *ispDir != "" {
+		if err := fetchISPIP(client, *ispDir); err != nil {
+			return err
+		}
+	}
+	if *skipQqwry {
+		return nil
+	}
 
 	// 1. 远端最新版本号（拿不到不致命，只影响日志）
 	if v, err := fetchVersion(client); err == nil && v != "" {
@@ -85,6 +98,36 @@ func runFetch(args []string) error {
 
 	log.Printf("已更新: %s (%.1f MB, md5 %s)", *out, float64(fi.Size())/1024/1024, newMD5[:8])
 	log.Printf("下一步: go run ./cmd/ip2region parse  (注意：换库后旧段的增强结果需重新跑)")
+	return nil
+}
+
+// fetchISPIP 下载 ispip.m27.tech 的各运营商网段表。
+// 页面正文就是纯 CIDR 列表，直接原样存盘，交给 ispip 包解析。
+func fetchISPIP(c *http.Client, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	keys := ispip.PageKeys()
+	ok, fail := 0, 0
+	for _, k := range keys {
+		url := ispip.SourceURL + k + ".html"
+		path := filepath.Join(dir, k+".html")
+		if err := download(c, url, path); err != nil {
+			log.Printf("  下载 %s 失败: %v", k, err)
+			fail++
+			continue
+		}
+		if fi, err := os.Stat(path); err == nil && fi.Size() < 200 {
+			log.Printf("  %s 内容异常（%d 字节），跳过", k, fi.Size())
+			fail++
+			continue
+		}
+		ok++
+	}
+	log.Printf("运营商网段表: 成功 %d 个页面，失败 %d 个 → %s", ok, fail, dir)
+	if ok == 0 {
+		return fmt.Errorf("网段表全部下载失败，检查网络或站点是否可用")
+	}
 	return nil
 }
 

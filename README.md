@@ -83,7 +83,8 @@ go run ./cmd/ip2region verify -n 50000
 - Go 1.26（见 `go.mod`）。下限被 `modernc.org/sqlite` 和 `golang.org/x/text` 拉高了，
   想降到更低版本需要同时降这两个依赖
 - 无需 CGO：SQLite 用纯 Go 驱动 `modernc.org/sqlite`，Windows 上直接编译，不用装 gcc
-- 能访问 `raw.githubusercontent.com`、`github.com`（下载数据）和 `opendata.baidu.com`（补空）
+- 能访问 `raw.githubusercontent.com`、`github.com`（下载 qqwry）、
+  `ispip.m27.tech`（下载运营商网段表）、`opendata.baidu.com`（补空）
 - 磁盘约 200MB（qqwry.dat 27MB + SQLite 300MB 左右，缓存表是主要占用）
 
 ```bash
@@ -96,7 +97,7 @@ go build ./cmd/ip2region    # 也可以编译成单二进制
 
 | 命令 | 作用 | 产物 | 耗时（实测） |
 |---|---|---|---|
-| `fetch` | 下载最新 metowolf `qqwry.dat` | `data/qqwry.dat` | 20 秒 |
+| `fetch` | 下载 `qqwry.dat` + 运营商网段表 | `data/qqwry.dat`、`data/ispip/` | 30 秒 |
 | `parse` | 解析 dat，拆省市区镇，落 SQLite | `data/ip2region.db` | 10 秒 |
 | `enrich` | 调百度补省市/ISP | 改写段表 + `ip_cache` | 首次 30 分钟，缓存后 25 秒 |
 | `refine` | 大段二分收敛细分 | 段表拆分 | 首次 13 分钟，缓存后 14 秒 |
@@ -135,8 +136,16 @@ go run ./cmd/ip2region fetch -out /tmp/qqwry.dat   # 下到别处
 go run ./cmd/ip2region fetch -force                # 内容相同也重写
 ```
 
-从 `metowolf/qqwry.dat` 的 release 拉最新 dat，先下到临时文件，校验体积（≥10MB）和 md5
-后才原子替换，内容没变就不动。
+一次做两件事：
+
+1. 从 `metowolf/qqwry.dat` 的 release 拉最新 dat，先下到临时文件，校验体积（≥10MB）和 md5
+   后才原子替换，内容没变就不动
+2. 从 `ispip.m27.tech` 下载 21 个运营商/云厂商网段表到 `data/ispip/`（约 768KB）
+
+```bash
+go run ./cmd/ip2region fetch -skip-qqwry     # 只更新网段表
+go run ./cmd/ip2region fetch -ispip ""        # 只更新 qqwry.dat
+```
 
 **不会自动跑 parse**：换库会让所有段重新编号，得重新增强，所以要不要换由你决定。
 
@@ -179,6 +188,7 @@ go run ./cmd/ip2region enrich -only-empty
 | `-mask` | `/24` | 网段去重粒度，可选 `/24` `/16` `none` |
 | `-dry-run` | false | 只统计不写段表（**仍会写缓存**，避免重复烧请求） |
 | `-override` | false | 允许覆盖已有省市，默认只补空 |
+| `-ispip` | `data/ispip` | 运营商网段表目录，空串表示不用（建表前先跑 `fetch`） |
 | `-only-empty` | false | 只处理省市缺失的段 |
 | `-conflicts` | `build/enrich-conflicts.tsv` | ISP 冲突样例输出，空字符串则不写 |
 | `-timeout` | 10s | 单请求超时 |
@@ -193,12 +203,40 @@ go run ./cmd/ip2region enrich -only-empty
   Akamai、BGP 多线、IDC 机房这类段的 IP 归属方是云厂商，但流量落在哪个 PoP 由路由决定，
   百度探到的是 PoP 城市而不是网段归属地。实测 `1.12.0.0/14`（腾讯云）百度说北京，
   qqwry 和另外两个独立源都说广东。这类段共 3,948 段 / 3,489 万 IP（中国空间 8.7%）。
+- **ISP 先看运营商网段表，再考虑百度。** `data/ispip/` 是 APNIC 分配记录，判"归属方"比百度
+  可靠（见下节）。百度只负责填空。
 - **区/镇永不改动。** 百度和 qqwry 都给不出可靠的区镇信息。
 - **ISP 只补空。** 两边都有值但不同只记冲突，不写库——qqwry 的"腾讯云/网宿"
   比百度的"电信"更细。
 
 请求量：19.2 万中国段按 `/24` 去重后是 11.4 万个探测点，每个点查一次百度。
 30 QPS 约 1 小时，60 QPS 约 30 分钟。所有结果落 `ip_cache` 表，**重跑零请求**。
+
+### 运营商网段表（ispip）
+
+`data/ispip/*.html` 来自 [ispip.m27.tech](https://ispip.m27.tech/)，数据由 APNIC 分配记录 + whois
+每日生成，每个运营商/云厂商一个页面，正文是纯 CIDR 列表。
+
+它和百度的本质区别：**这是分配归属，不是探测点位置**。所以 `1.12.0.0/14`（腾讯云）不会被
+说成"北京电信"，也不受 anycast / PoP 影响。
+
+enrich 会先用它定 ISP：
+
+| 情况 | 动作 |
+|---|---|
+| 段的 ISP 为空，网段表有值 | 填（实测 1,437 段） |
+| 网段表判定为云/IDC（腾讯云、阿里云、华为云、网宿…），原值是基础运营商 | 纠正（实测 339 段） |
+| 两边都是基础运营商（电信↔联通） | 不动，歧义太大 |
+| 网段表没覆盖 | 交给百度填空 |
+
+优先级设计：云厂商/IDC（40）> 教育网/科技网/广电（20）> 基础运营商（10）。
+不这样排的话，运营商列表会把云厂商的段抢走——同一个 `1.12.0.0/14` 在电信和腾讯云两个列表里都有。
+
+**不收录 `othernet` / `hongkong` / `macau` / `taiwan` 四个页面**：它们是地域兜底桶，不是运营商，
+拿来当 ISP 会把"台湾某固网"写成"台湾"。
+
+实测它的判断和 qqwry 的 ISP 一致率 91.1%（有覆盖的段中），分歧里有 284 段是
+"qqwry 说长城宽带、网段表说腾讯云"——这类是真实转售关系，按优先级改对了。
 
 ### refine：大段细分
 
@@ -436,7 +474,7 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 | 市 | 81.18% | **91.54%** | qqwry + 百度补空 |
 | 区县 | 4.67% | 4.67% | 只有 qqwry 有，数据源就少 |
 | 乡镇 | 15.01% | 15.01% | 同上 |
-| ISP | 85.00% | **89.56%** | qqwry + 百度补空 |
+| ISP | 85.00% | **90.48%** | qqwry + 网段表 + 百度补空 |
 
 ### 三个硬限制，先说清楚
 
@@ -457,6 +495,7 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 | 数据 | 来源 | 更新频率 |
 |---|---|---|
 | 基础归属 | [metowolf/qqwry.dat](https://github.com/metowolf/qqwry.dat) | 每周 |
+| 运营商归属 | [ispip.m27.tech](https://ispip.m27.tech/)（APNIC + whois） | 每日 |
 | 省市/ISP 补空 | 百度 opendata IP 接口（`resource_id=6006`） | 实时 |
 | 人工规则 | `data/custom/*.txt` | 你说了算 |
 
@@ -561,9 +600,10 @@ cmd/ip2region/          唯一入口，子命令分发
 
 internal/geo/           GeoInfo(6段) / Segment / 区间运算（Normalize/Apply/Compact/Validate/Find）
 internal/qqwry/         qqwry.dat 解析（GB18030 解码、0x01/0x02 跳转）
-internal/regions/       行政区划切分、ISP 归一、云厂商识别、百度 location 解析
+internal/regions/       行政区划切分、ISP 归一（含港澳台运营商）、云厂商识别、百度 location 解析
 internal/store/         SQLite：段表 / ip_cache / meta
 internal/provider/      外部数据源接口 + 百度实现
+internal/ispip/         运营商网段表解析（APNIC 分配归属）
 internal/enrich/        /24 去重、限流、缓存复用、冲突裁定
 internal/refine/        大段二分收敛细分
 internal/xdbmaker/      官方 xdb maker + searcher（Apache 2.0，收编进仓库自包含）
@@ -603,6 +643,7 @@ go test ./...
 | `internal/provider` | httptest 模拟接口：正常/空数据/429/5xx 的分类 |
 | `internal/enrich` | 补空、覆盖、云段保护、低置信度保护、ISP 冲突 8 个子用例 |
 | `internal/refine` | 大段切分、三点一致不细分、云段不被覆盖、区镇保留 |
+| `internal/ispip` | CIDR 解析、云厂商优先于运营商、兜底桶不当 ISP、/14 边界 |
 
 改 `decide` / `applyTo` 里的规则前，先看对应测试——那些用例记录了踩过的坑。
 
