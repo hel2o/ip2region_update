@@ -1,4 +1,4 @@
-// Package provider 封装外部 IP 归属查询服务（当前实现百度 opendata 接口）。
+// Package provider 封装外部 IP 归属查询服务（qifu 画像接口 + 百度 opendata 备用）。
 //
 // 设计要点：provider 只负责"查一个 IP 返回原始结构化结果"，
 // 缓存、限流、收敛、冲突裁定全在 enrich 层，方便换源（高德/ip138）而不改上层。
@@ -38,6 +38,22 @@ type Provider interface {
 // 无数据要缓存（否则重跑会重新请求一遍空结果），限流/封禁/网络错误不能缓存。
 func IsCacheable(err error) bool {
 	return errors.Is(err, ErrNoData)
+}
+
+// CacheNamer 是可选接口：返回参与缓存匹配的 provider 名（可含历史名/组合名）。
+// 换源后旧缓存仍能被复用，不必整库重查。
+type CacheNamer interface {
+	CacheNames() []string
+}
+
+// CacheNames 取一个 provider 的缓存匹配名列表（未实现 CacheNamer 时退化为 Name()）。
+func CacheNames(p Provider) []string {
+	if n, ok := p.(CacheNamer); ok {
+		if v := n.CacheNames(); len(v) > 0 {
+			return v
+		}
+	}
+	return []string{p.Name()}
 }
 
 // nowMs 便于测试替换。

@@ -193,8 +193,8 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 					return
 				}
 
-				// 先查 DB 缓存（同 /24 任一条即可）
-				if cached, ok, err := db.GetCacheInRange(pr.key, pr.key|^opt.Mask, p.Name()); err == nil && ok {
+				// 先查 DB 缓存（同 /24 任一条即可；换源后历史缓存也要命中）
+				if cached, ok, err := db.GetCacheInRangeAny(pr.key, pr.key|^opt.Mask, provider.CacheNames(p)); err == nil && ok {
 					res := provider.Result{
 						Province: cached.Province, City: cached.City,
 						County: cached.District, ISP: cached.ISP, Raw: cached.Raw,
@@ -881,7 +881,7 @@ func fillFromFallback(ctx context.Context, db *store.DB, opt Options, pr *probe,
 
 	// 备用源也走缓存，避免重跑重复烧配额
 	lo, hi := pr.key, pr.key|^opt.Mask
-	if c, ok, err := db.GetCacheInRange(lo, hi, fb.Name()); err == nil && ok {
+	if c, ok, err := db.GetCacheInRangeAny(lo, hi, provider.CacheNames(fb)); err == nil && ok {
 		res.Province, res.City = c.Province, c.City
 		res.Raw = res.Raw + " →" + fb.Name() + ":" + c.Raw
 		return res

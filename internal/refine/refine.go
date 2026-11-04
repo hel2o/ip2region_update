@@ -203,7 +203,7 @@ var errBudget = errors.New("refine: 请求预算用尽")
 // probeGeo 查一个 IP 的归属，优先读缓存。
 func (r *refiner) probeGeo(ctx context.Context, ip uint32) (provider.Result, bool, error) {
 	lo, hi := ip&0xFFFFFF00, ip|0xFF
-	if c, ok, err := r.db.GetCacheInRange(lo, hi, r.p.Name()); err == nil && ok {
+	if c, ok, err := r.db.GetCacheInRangeAny(lo, hi, provider.CacheNames(r.p)); err == nil && ok {
 		r.mu.Lock()
 		r.stat.CacheHits++
 		r.mu.Unlock()

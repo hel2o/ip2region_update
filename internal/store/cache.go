@@ -39,9 +39,26 @@ func (s *DB) GetCache(ip uint32, provider string) (CachedResult, bool, error) {
 
 // GetCacheInRange 在 [lo,hi] 内找一条已有缓存（用于 /24 级复用）。
 func (s *DB) GetCacheInRange(lo, hi uint32, provider string) (CachedResult, bool, error) {
-	row := s.db.QueryRow(`SELECT ip, provider, province, city, district, isp, raw, fetched_at
-		FROM ip_cache WHERE ip BETWEEN ? AND ? AND provider = ?
-		ORDER BY fetched_at DESC LIMIT 1`, int64(lo), int64(hi), provider)
+	return s.GetCacheInRangeAny(lo, hi, []string{provider})
+}
+
+// GetCacheInRangeAny 在 [lo,hi] 内找一条属于任意给定 provider 的缓存。
+// providers 为空表示不限 provider。用于换源后仍能复用旧源的缓存。
+func (s *DB) GetCacheInRangeAny(lo, hi uint32, providers []string) (CachedResult, bool, error) {
+	query := `SELECT ip, provider, province, city, district, isp, raw, fetched_at
+		FROM ip_cache WHERE ip BETWEEN ? AND ?`
+	args := []any{int64(lo), int64(hi)}
+	if len(providers) > 0 {
+		ph := make([]string, len(providers))
+		for i, p := range providers {
+			ph[i] = "?"
+			args = append(args, p)
+		}
+		query += " AND provider IN (" + strings.Join(ph, ",") + ")"
+	}
+	query += " ORDER BY fetched_at DESC LIMIT 1"
+
+	row := s.db.QueryRow(query, args...)
 	var r CachedResult
 	var ipv int64
 	err := row.Scan(&ipv, &r.Provider, &r.Province, &r.City, &r.District, &r.ISP, &r.Raw, &r.FetchedAt)

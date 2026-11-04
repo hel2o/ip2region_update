@@ -760,11 +760,11 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 
 重载接口（文件全部同步成功后才调；任一目标同步失败就整轮不重载，避免新旧混读）：
 
-| 服务 | 接口 | 认证 |
+| 服务 | 接口 | 返回 |
 |---|---|---|
-| sniffer | `http://172.25.0.19:8080/reloadIp2Region` | 无 |
-| english_school | `https://cs.clifford.cn/reloadxdb` | 无 |
-| management-system | `https://network.clifford.cn/api/admin/reloadIp2Region` | 需登录 Cookie |
+| sniffer | `http://172.25.0.19:8080/reloadIp2Region` | `{"code":0,"costMs":36,...,"message":"ok"}` |
+| english_school | `https://cs.clifford.cn/reloadxdb` | `{"code":1,"message":"ok","data":{"path":"ip2region.xdb",...}}` |
+| management-system | `https://network.clifford.cn/api/admin/reloadIp2Region` | `{"code":3000,"msg":"reloaded"}` |
 
 ```bash
 ./sync.sh              # 同步 + 重载
@@ -773,12 +773,13 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 ./sync.sh -keep 5      # 每个目标保留 5 份历史备份（默认 3）
 ./sync.sh -skip-reload          # 只传文件
 ./sync.sh -strict-reload        # 重载失败也算失败（默认只告警）
-./sync.sh -ms-cookie 'token=..;account=..'   # 管理平台重载用，也可用 IPREGION_MS_COOKIE
+./sync.sh -ms-cookie 'token=..;account=..'   # 可选：给重载接口带登录 Cookie
 ```
 
-> management-system 的 `reloadIp2Region` 挂在 `AuthMiddleware` 后面，必须带登录 Cookie。
-> 没配 Cookie 时脚本会打印 `[跳过]` 并继续，其他两个接口照常调；Cookie 过期会返回
-> `code 4001`，脚本会报 `[失败]`。Cookie 会随登录态失效，不建议写进脚本，用环境变量传。
+> 三个接口 2026-11-04 起都免登录。`management-system` 的那个原本挂在 `AuthMiddleware` 后面，
+> 现在单独放开了；以后若改回鉴权，脚本会打出 `[失败] … {"code":4001,"errMsg":"请先登录"}`，
+> 这时用 `-ms-cookie`（或环境变量 `IPREGION_MS_COOKIE`）把浏览器的 `token` + `account`
+> 传进去即可。Cookie 会过期，不建议写死进脚本。
 
 实现要点（都是为了避免线上读到半截文件）：
 
@@ -791,8 +792,9 @@ git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
 - **回读校验**：每个目标传完重新 `md5sum` 比对，不一致退出码非 0。
 - **防呆**：源文件小于 5MB 直接拒绝推（半截文件/空占位别砸线上）。
 
-`172.25.0.19` 需要 `es_deploy` 免密（`~/.ssh/config` 里已配好 `Host 172.25.0.19`），
-没配好时脚本会打 `!! ssh ... 不通` 并继续处理其它机器。
+三台机器都要免密（`~/.ssh/config` 里 `192.168.99.26` 用 `es_deploy`，`172.25.0.19` 与
+`172.19.99.1` 也已配好）。某台连不上时脚本打 `!! ssh ... 连不上` 跳过该机、继续处理其它机器，
+最后退出码非 0 提醒你；该机的文件和重载都没动，仍是旧的一致版本，修好免密重跑一次补齐即可。
 
 ---
 

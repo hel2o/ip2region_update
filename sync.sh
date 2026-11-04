@@ -8,8 +8,8 @@
 #   ./sync.sh -skip-reload            只传文件，不调重载接口
 #   ./sync.sh -strict-reload          重载失败也算失败（默认只告警）
 #   ./sync.sh -ms-cookie 'token=..;account=..'
-#                                     调 management-system 重载所需的登录 Cookie
-#                                     （也可用环境变量 IPREGION_MS_COOKIE）
+#                                     可选：给重载接口带登录 Cookie（管理平台已免登录，
+#                                     以后若改回需鉴权再用它），也可用 IPREGION_MS_COOKIE
 #
 # 目标（host|路径）：
 #   192.168.99.26  /home/work/management-system/xdb/ip2region.xdb
@@ -45,11 +45,11 @@ TARGETS=(
     "172.19.99.1|/home/english_school/ip2region.xdb"
 )
 
-# 重载接口：名称|URL|是否需要登录 Cookie
+# 重载接口：名称|URL
 RELOADS=(
-    "sniffer|http://172.25.0.19:8080/reloadIp2Region|0"
-    "english_school|https://cs.clifford.cn/reloadxdb|0"
-    "management-system|https://network.clifford.cn/api/admin/reloadIp2Region|1"
+    "sniffer|http://172.25.0.19:8080/reloadIp2Region"
+    "english_school|https://cs.clifford.cn/reloadxdb"
+    "management-system|https://network.clifford.cn/api/admin/reloadIp2Region"
 )
 
 # 调试用：IPREGION_TARGETS="host|path;host|path" / IPREGION_RELOADS="name|url|0;name2|url2|1"
@@ -157,7 +157,9 @@ done || true
 rm -f "$tmp"
 REMOTE
 
-FAILED=0
+FAILED=0      # 数据层面的失败（写了一半 / md5 不符），必须拦住重载
+UNREACH=0     # 整台连不上：该机数据没动过，仍是旧的一致版本，不拦重载
+UNREACH_LIST=""
 TOTAL_OK=0
 TOTAL_SAME=0
 
@@ -172,7 +174,8 @@ for host in "${HOSTS[@]}"; do
 
     if [ "$DRY" = "1" ]; then
         if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" true 2>/dev/null; then
-            echo "  !! ssh $host 不通（跳过检查）"; FAILED=1; echo; continue
+            echo "  !! ssh $host 不通（跳过检查，该机数据保持旧版）"
+            UNREACH=1; UNREACH_LIST="$UNREACH_LIST $host"; echo; continue
         fi
         for t in "${paths[@]}"; do
             cur=$(ssh "$host" "if [ -f '$t' ]; then md5sum '$t' | cut -d' ' -f1; else echo MISSING; fi")
@@ -198,6 +201,12 @@ REMOTE_MD5
         [ "$cur" = "$MD5" ] || ALL_SAME=0
     done
 
+    # 一个 md5 都没拿到 = 这台连不上，后续上传必然失败，直接跳过
+    if [ -z "$(printf '%s' "$CUR_MD5S" | tr -d '[:space:]')" ]; then
+        echo "  !! ssh $host 连不上（免密/网络），跳过该机"
+        UNREACH=1; UNREACH_LIST="$UNREACH_LIST $host"; echo; continue
+    fi
+
     if [ "$ALL_SAME" = "1" ]; then
         for t in "${paths[@]}"; do printf '  [最新] %s\n' "$t"; done
         TOTAL_SAME=$((TOTAL_SAME + ${#paths[@]}))
@@ -211,8 +220,8 @@ REMOTE_MD5
         echo -n "  上传中 ... "
         if ! scp -q -o BatchMode=yes -o ConnectTimeout=8 "$SRC" "$host:$REMOTE_TMP"; then
             echo "失败"
-            echo "  !! scp 到 $host 失败（检查免密/网络）"
-            FAILED=1; echo; continue
+            echo "  !! scp 到 $host 失败（检查免密/网络），跳过该机"
+            UNREACH=1; UNREACH_LIST="$UNREACH_LIST $host"; echo; continue
         fi
         echo "完成"
     fi
@@ -245,14 +254,20 @@ done
 
 if [ "$DRY" = "1" ]; then
     echo "[dry-run] 结束（未上传、未重载）"
-    exit $FAILED
+    [ "$FAILED" = "0" ] && [ "$UNREACH" = "0" ] && exit 0
+    exit 1
 fi
 
 echo "==== 文件同步：$TOTAL_OK 个更新，$TOTAL_SAME 个已是最新 ===="
 
 if [ "$FAILED" != "0" ]; then
-    echo "!! 有目标同步失败，跳过重载（避免服务读到新旧混合的数据）" >&2
+    echo "!! 有目标写入失败或校验不通过，跳过重载（避免服务读到新旧混合的数据）" >&2
     exit 1
+fi
+
+if [ "$UNREACH" != "0" ]; then
+    echo "!! 这些机器没同步上，保持旧库：$UNREACH_LIST" >&2
+    echo "   （其余机器照常重载；修好免密后重跑一次即可）" >&2
 fi
 
 if [ "$SKIP_RELOAD" = "1" ]; then
@@ -265,15 +280,9 @@ echo
 echo "==== 调用重载接口 ===="
 RELOAD_FAILED=0
 for spec in "${RELOADS[@]}"; do
-    name="${spec%%|*}"; rest="${spec#*|}"
-    url="${rest%%|*}"; need_auth="${rest##*|}"
+    name="${spec%%|*}"; url="${spec#*|}"
 
-    if [ "$need_auth" = "1" ] && [ -z "$MS_COOKIE" ]; then
-        printf '  [跳过] %-17s %s\n         需要登录 Cookie：-ms-cookie 或 IPREGION_MS_COOKIE\n' "$name" "$url"
-        continue
-    fi
-
-    if [ -n "$MS_COOKIE" ] && [ "$need_auth" = "1" ]; then
+    if [ -n "$MS_COOKIE" ]; then
         RAW=$(curl -sS -k -m 15 -w '\n%{http_code}' -H "Cookie: $MS_COOKIE" "$url" 2>&1) || true
     else
         RAW=$(curl -sS -k -m 15 -w '\n%{http_code}' "$url" 2>&1) || true
@@ -294,6 +303,6 @@ echo
 if [ "$RELOAD_FAILED" = "1" ]; then
     echo "!! 有重载接口调用失败，对应服务可能仍在用旧库（文件已更新，可稍后手动重载）" >&2
     [ "$STRICT_RELOAD" = "1" ] && exit 1
-    exit 0
 fi
 echo "==== 完成 ===="
+[ "$UNREACH" = "0" ] || exit 1
