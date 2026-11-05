@@ -43,8 +43,8 @@ func runAll(args []string) error {
 
 	qps := fs.Int("qps", 60, "enrich / refine 的请求速率上限")
 	workers := fs.Int("workers", 8, "并发数")
-	probeStep := fs.Int("probe-step", 2048, "片内每多少 IP 布一个探测点")
-	probeCap := fs.Int("probe-cap", 256, "每个段最多几个探测点")
+	probeStep := fs.Int("probe-step", 512, "片内每多少 IP 布一个探测点")
+	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就合并")
 
 	verifyN := fs.Int("verify-n", 100000, "verify 对拍抽样 IP 数（0 = 跳过对拍）")

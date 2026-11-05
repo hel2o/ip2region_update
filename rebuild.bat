@@ -11,6 +11,10 @@ REM ============================================================
 setlocal
 cd /d "%~dp0"
 
+REM qifu/opendata must bypass the local HTTP proxy (2.5x slower through it)
+set NO_PROXY=qifu.baidu.com,opendata.baidu.com
+set no_proxy=qifu.baidu.com,opendata.baidu.com
+
 echo [1/2] building tool ...
 go build -o build\ip2region.exe .\cmd\ip2region
 if errorlevel 1 (

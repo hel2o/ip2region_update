@@ -35,8 +35,8 @@ func runEnrich(args []string) error {
 	amapKey := fs.String("amap-key", os.Getenv("AMAP_KEY"), "高德 Web 服务 Key（只用于补百度缺失的省市，留空则不启用）")
 	primary := fs.String("primary", "qifu", "主查询源: qifu（默认，失败自动回退 opendata）| opendata")
 	refresh := fs.Bool("refresh", false, "刷新模式：忽略换源前的历史缓存，全部重新查询（本次写入的缓存仍可断点续跑）")
-	probeStep := fs.Int("probe-step", 2048, "每多少 IP 布一个探测点（0=每段只探中点）")
-	probeCap := fs.Int("probe-cap", 256, "每个段最多几个探测点（0=不封顶）")
+	probeStep := fs.Int("probe-step", 512, "每多少 IP 布一个探测点（0=每段只探中点）")
+	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点（0=不封顶）")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就与相邻片合并（0=不合并）")
 	_ = fs.Parse(args)
 
