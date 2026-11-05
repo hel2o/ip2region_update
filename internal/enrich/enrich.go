@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hel2o/ip2region/internal/adaptive"
 	"github.com/hel2o/ip2region/internal/geo"
 	"github.com/hel2o/ip2region/internal/geocn"
 	"github.com/hel2o/ip2region/internal/ispip"
@@ -33,7 +34,8 @@ import (
 
 // Options 控制 enrich 行为。
 type Options struct {
-	QPS          int    // 全局请求速率上限
+	QPS          int    // 全局请求速率上限（自适应模式下是天花板）
+	Adaptive     bool   // 拥塞控制式动态限速：延迟劣化/出错退避，健康时爬升
 	Workers      int    // 并发数
 	Limit        int    // 最多发多少次请求（0 = 不限，测试用）
 	Mask         uint32 // 按此掩码去重（默认 /24 = 0xFFFFFF00；传 0 表示不去重）
@@ -156,24 +158,48 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	log.Printf("待增强中国段 %d 个，按密度切出 %d 片，去重后探测点 %d 个（并发 %d，限速 %d QPS）",
 		st.Segments, st.Pieces, st.Probes, opt.Workers, opt.QPS)
 
-	// 2. 限速器
-	interval := time.Second / time.Duration(opt.QPS)
-	tokens := make(chan struct{}, 1)
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
+	// 2. 限速器：固定速率或自适应（拥塞控制式，-qps 是上限）
+	stopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var tokens chan struct{}
+	var actl *adaptive.Controller
+	if opt.Adaptive {
+		actl = adaptive.New(opt.QPS)
+		actl.Start(stopCtx)
+		tokens = actl.Tokens()
+		go func() { // 窗口决策：每秒根据反馈调一次速率
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
 				select {
-				case tokens <- struct{}{}:
-				default:
+				case <-stopCtx.Done():
+					return
+				case <-t.C:
+					actl.Adjust()
 				}
 			}
-		}
-	}()
+		}()
+		log.Printf("自适应限速已启用：上限 %d QPS，起始 %.0f，延迟劣化/出错自动退避", opt.QPS, actl.Current())
+	} else {
+		interval := time.Second / time.Duration(opt.QPS)
+		tokens = make(chan struct{}, 1)
+		go func() {
+			t := time.NewTicker(interval)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					select {
+					case tokens <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+	}
 
 	// 3. worker 池
 	type probeResult struct {
@@ -191,8 +217,6 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	var reqCount int64
 	var errLogN int32
 	var ctxStop atomic.Bool
-	stopCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	var wg sync.WaitGroup
 	for w := 0; w < opt.Workers; w++ {
@@ -227,7 +251,12 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 				}
 				atomic.AddInt64(&reqCount, 1)
 
+				t0 := time.Now()
 				res, err := p.Lookup(stopCtx, pr.ip)
+				if actl != nil {
+					// 无数据是正常应答（源承认查不到），不算拥塞信号
+					actl.Record(time.Since(t0), err != nil && !errors.Is(err, provider.ErrNoData))
+				}
 				if err == nil {
 					res = fillFromFallback(stopCtx, db, opt, pr, res, tokens, &reqCount)
 				}
@@ -340,8 +369,13 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 			if (st.DBHits+st.Requests)%opt.ProgressN == 0 {
 				el := time.Since(start)
 				rate := float64(st.Requests) / el.Seconds()
-				log.Printf("进度 %d/%d（请求 %d，缓存 %d，%.1f req/s）",
-					st.DBHits+st.Requests, st.Probes, st.Requests, st.DBHits, rate)
+				if actl != nil {
+					log.Printf("进度 %d/%d（请求 %d，缓存 %d，%.1f req/s，当前限速 %.0f）",
+						st.DBHits+st.Requests, st.Probes, st.Requests, st.DBHits, rate, actl.Current())
+				} else {
+					log.Printf("进度 %d/%d（请求 %d，缓存 %d，%.1f req/s）",
+						st.DBHits+st.Requests, st.Probes, st.Requests, st.DBHits, rate)
+				}
 			}
 		}
 	}()

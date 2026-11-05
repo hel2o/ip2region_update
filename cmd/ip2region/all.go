@@ -106,6 +106,7 @@ func runAll(args []string) error {
 				"-probe-step", strconv.Itoa(*probeStep),
 				"-probe-cap", strconv.Itoa(*probeCap),
 				"-min-piece", strconv.Itoa(*minPiece),
+				"-adaptive", "true",
 			}
 			if *amapKey != "" {
 				a = append(a, "-amap-key", *amapKey)
@@ -185,4 +186,3 @@ func humanSize(n int64) string {
 		return fmt.Sprintf("%d B", n)
 	}
 }
-
