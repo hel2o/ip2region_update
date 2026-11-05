@@ -337,8 +337,9 @@ go run ./cmd/ip2region enrich -only-empty
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `-qps` | 20 | 全局请求速率上限 |
-| `-workers` | 8 | 并发数 |
+| `-qps` | 100 | 请求速率上限（自适应模式下是天花板） |
+| `-workers` | 16 | 并发数 |
+| `-adaptive` | **true** | 拥塞控制式动态限速：健康时爬升，延迟劣化/出错自动退避；传 `-adaptive=false` 退回固定限速 |
 | `-primary` | `qifu` | 主查询源：`qifu`（失败自动回退 opendata）/ `opendata` |
 | `-refresh` | false | 忽略换源前的历史缓存，全部重查（本次写入的缓存仍可断点续跑） |
 | `-limit` | 0 | 最多请求数，0 表示不限（试跑用） |
@@ -348,10 +349,9 @@ go run ./cmd/ip2region enrich -only-empty
 | `-ispip` | `data/ispip` | 运营商网段表目录，空串表示不用（建表前先跑 `fetch`） |
 | `-geocn` | `data/geocn/GeoCN.mmdb` | GeoCN 离线库，空串表示不补区县 |
 | `-amap-key` | `$AMAP_KEY` | 高德 Web 服务 Key，只用于补百度缺失的省市（留空不启用） |
-| `-probe-step` | 2048 | 片内每多少 IP 布一个探测点（0 = 每片只探中点） |
-| `-probe-cap` | 256 | 每个段最多几个探测点，超出则整段均匀等分 |
+| `-probe-step` | 512 | 片内每多少 IP 布一个探测点（0 = 每片只探中点） |
+| `-probe-cap` | 1024 | 每个段最多几个探测点（0 = 不封顶） |
 | `-min-piece` | 2048 | GeoCN 切片小于该值就与相邻片合并 |
-| `-probe-cap` | 64 | 每个段最多几个探测点 |
 | `-only-empty` | false | 只处理省市缺失的段 |
 | `-conflicts` | `build/enrich-conflicts.tsv` | ISP 冲突样例输出，空字符串则不写 |
 | `-timeout` | 10s | 单请求超时 |

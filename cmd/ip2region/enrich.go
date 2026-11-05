@@ -21,8 +21,8 @@ import (
 func runEnrich(args []string) error {
 	fs := newFlagSet("enrich", "调百度接口校正省市与 ISP（只补空/纠省市，不动区镇）")
 	dbPath := fs.String("db", "data/ip2region.db", "SQLite 路径")
-	qps := fs.Int("qps", 20, "全局请求速率上限")
-	workers := fs.Int("workers", 8, "并发数")
+	qps := fs.Int("qps", 100, "全局请求速率上限（自适应模式下是天花板）")
+	workers := fs.Int("workers", 16, "并发数")
 	limit := fs.Int("limit", 0, "最多请求数（0=不限，试跑用 200）")
 	mask := fs.String("mask", "/24", "按此网段去重: /24 | /16 | none")
 	dry := fs.Bool("dry-run", false, "只统计不写库")

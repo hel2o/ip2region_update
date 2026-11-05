@@ -41,8 +41,8 @@ func runAll(args []string) error {
 	legacyXdb := fs.String("legacy-xdb", "build/compare/old.xdb", "旧版 xdb（用作境外省市补充，文件不存在则跳过）")
 	amapKey := fs.String("amap-key", os.Getenv("AMAP_KEY"), "高德 Key（补百度缺失的省市，留空不启用）")
 
-	qps := fs.Int("qps", 60, "enrich / refine 的请求速率上限")
-	workers := fs.Int("workers", 8, "并发数")
+	qps := fs.Int("qps", 100, "enrich / refine 的请求速率上限（自适应模式下是天花板）")
+	workers := fs.Int("workers", 16, "并发数")
 	probeStep := fs.Int("probe-step", 512, "片内每多少 IP 布一个探测点")
 	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就合并")
