@@ -30,8 +30,8 @@ import "github.com/lionsoul2014/ip2region/binding/golang/xdb"
 searcher, _ := xdb.NewWithFileOnly("ip2region_20261105.xdb")
 defer searcher.Close()
 
-region, _ := searcher.SearchByStr("183.3.149.185")
-// → "中国|广东省|广州市|番禺区|钟村|中国电信"
+region, _ := searcher.SearchByStr("14.215.177.38")
+// → "中国|广东省|广州|||中国电信"
 
 parts := strings.SplitN(region, "|", 6)
 // parts[0] 国家  parts[1] 省  parts[2] 市  parts[3] 区县  parts[4] 乡镇  parts[5] ISP
