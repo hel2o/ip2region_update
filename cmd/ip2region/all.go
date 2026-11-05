@@ -45,7 +45,7 @@ func runAll(args []string) error {
 
 	qps := fs.Int("qps", 100, "enrich / refine 的请求速率上限（自适应模式下是天花板）")
 	workers := fs.Int("workers", 16, "并发数")
-	probeStep := fs.Int("probe-step", 512, "片内每多少 IP 布一个探测点")
+	probeStep := fs.Int("probe-step", 256, "片内每多少 IP 布一个探测点")
 	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就合并")
 	probeJitter := fs.Float64("probe-jitter", 0.6, "探测点片内随机偏移比例 0~1（0=固定中点/可复现，默认 0.6 每次不同）")

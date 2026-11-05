@@ -19,15 +19,15 @@ import (
 //   - 两个都非空：不动（本轮探测结果优先，宁可信新不信旧）
 //
 // 只填空、不覆盖，所以不会把上一轮清掉的错误值又搬回来。
-func SeedFromDB(segs []geo.Segment, oldPath string) (fillProv, fillCity int, err error) {
+func SeedFromDB(segs []geo.Segment, oldPath string) (ups []store.SegmentUpdate, fillProv, fillCity int, err error) {
 	old, err := store.Open(oldPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("打开旧库 %s: %w", oldPath, err)
+		return nil, 0, 0, fmt.Errorf("打开旧库 %s: %w", oldPath, err)
 	}
 	defer old.Close()
 	olds, err := old.LoadSegments()
 	if err != nil {
-		return 0, 0, fmt.Errorf("读旧库段表: %w", err)
+		return nil, 0, 0, fmt.Errorf("读旧库段表: %w", err)
 	}
 	log.Printf("旧库回填：旧库 %d 段，本库 %d 段", len(olds), len(segs))
 
@@ -75,14 +75,19 @@ func SeedFromDB(segs []geo.Segment, oldPath string) (fillProv, fillCity int, err
 			continue
 		}
 		o := olds[best]
-		if s.Geo.Province == "" && o.Geo.Province != "" {
+		beforeP, beforeC := s.Geo.Province, s.Geo.City
+		if beforeP == "" && o.Geo.Province != "" {
 			s.Geo.Province = o.Geo.Province
 			fillProv++
 		}
-		if s.Geo.City == "" && o.Geo.City != "" {
+		if beforeC == "" && o.Geo.City != "" {
 			s.Geo.City = o.Geo.City
 			fillCity++
 		}
+		if s.Geo.Province != beforeP || s.Geo.City != beforeC {
+			pv, cv := s.Geo.Province, s.Geo.City
+			ups = append(ups, store.SegmentUpdate{Start: s.Start, Province: &pv, City: &cv})
+		}
 	}
-	return fillProv, fillCity, nil
+	return ups, fillProv, fillCity, nil
 }

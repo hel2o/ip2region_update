@@ -125,26 +125,8 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	// source 标记用真实来源（qifu / baidu），不再写死 +baidu
 	srcTag := "+" + provider.ShortName(p)
 
-	// 0. 先用上一轮库回填空省市：全量重建时 parse 会重灌段表，
-	// 源后来查不到的历史积累（台湾城市、云段省市）只能靠旧库补回。
-	if opt.SeedDB != "" {
-		fp, fc, err := SeedFromDB(segs, opt.SeedDB)
-		if err != nil {
-			log.Printf("旧库回填失败（继续）: %v", err)
-		} else if fp > 0 || fc > 0 {
-			log.Printf("旧库回填: 补省 %d 段, 补市 %d 段", fp, fc)
-		}
-	}
-
-	// 0.1 先用运营商网段表定 ISP（分配归属，比百度可靠）
-	if opt.ISPTables != nil {
-		filled, fixed, err := applyISPTables(db, segs, opt.ISPTables, opt.DryRun)
-		if err != nil {
-			return st, err
-		}
-		st.ISPFilledByNet, st.ISPFixedByNet = filled, fixed
-		log.Printf("网段表定 ISP: 补空 %d 段, 纠正 %d 段", filled, fixed)
-	}
+	// ISP 优先级（从高到低）：自定义覆盖（merge 阶段最后生效）> 查询源（百度）> 网段表。
+	// 网段表移到最后只补空，见第 7 步。
 
 	// 1. 组装 probe 列表（GeoCN 边界优先切片，片内再按 IP 数等分，最后按 /24 去重）
 	//
@@ -501,6 +483,50 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		}
 	}
 
+	// 6.5 用上一轮库回填空省市。
+	// 必须放在切段之后：丢数据发生在"切出的新片没拿到省市"，
+	// 而不是 parse 出来的初始段表（那时字段通常都是全的）。
+	if opt.SeedDB != "" {
+		if !opt.DryRun {
+			if reloaded, err := db.LoadSegments(); err == nil {
+				segs = reloaded
+			}
+		}
+		ups, fp, fc, err := SeedFromDB(segs, opt.SeedDB)
+		if err != nil {
+			log.Printf("旧库回填失败（继续）: %v", err)
+		} else if len(ups) > 0 {
+			if !opt.DryRun {
+				for i := 0; i < len(ups); i += 5000 {
+					end := i + 5000
+					if end > len(ups) {
+						end = len(ups)
+					}
+					if err := db.UpdateSegments(ups[i:end]); err != nil {
+						log.Printf("旧库回填写入失败: %v", err)
+						break
+					}
+				}
+			}
+			log.Printf("旧库回填: 补省 %d 段, 补市 %d 段", fp, fc)
+		}
+	}
+
+	// 7. 网段表最后追加：只补仍然为空的 ISP，不覆盖查询源/qqwry 的结论
+	if opt.ISPTables != nil {
+		if !opt.DryRun {
+			if reloaded, err := db.LoadSegments(); err == nil {
+				segs = reloaded
+			}
+		}
+		filled, fixed, err := applyISPTables(db, segs, opt.ISPTables, opt.DryRun)
+		if err != nil {
+			return st, err
+		}
+		st.ISPFilledByNet, st.ISPFixedByNet = filled, fixed
+		log.Printf("网段表追加 ISP: 补空 %d 段, 纠正 %d 段", filled, fixed)
+	}
+
 	st.Elapsed = time.Since(start)
 
 	if err := writeConflicts(opt.ConflictFile, conflicts); err != nil {
@@ -790,13 +816,10 @@ func isMunicipality(name string) bool {
 	return false
 }
 
-// applyISPTables 用运营商网段表设置 ISP。
+// applyISPTables 用运营商网段表**追加** ISP。
 //
-// 规则：
-//   - ISP 为空 → 直接填
-//   - 网段表判定为云/IDC（优先级 >= 30）且当前是基础运营商 → 纠正
-//     （分配方比转售线路更准确，如长城宽带的段租给腾讯云）
-//   - 其余情况不动（运营商之间互换歧义大，不做判断）
+// 优先级约定：自定义覆盖 > 查询源（百度）> 网段表。所以这里只补空，
+// 不覆盖任何已有值（调用点已移到 enrich 最后一步）。
 func applyISPTables(db *store.DB, segs []geo.Segment, t *ispip.Table, dryRun bool) (filled, fixed int, err error) {
 	var batch []store.SegmentUpdate
 	flush := func() error {
@@ -829,13 +852,6 @@ func applyISPTables(db *store.DB, segs []geo.Segment, t *ispip.Table, dryRun boo
 			})
 			sg.Geo.ISP = op
 			filled++
-		} else if ispip.Priority(op) >= 30 && ispip.Priority(sg.Geo.ISP) < 30 {
-			v := op
-			batch = append(batch, store.SegmentUpdate{
-				Start: sg.Start, ISP: &v, Source: TagSource(sg.Source, "+ispip"),
-			})
-			sg.Geo.ISP = op
-			fixed++
 		}
 		if len(batch) >= 5000 {
 			if e := flush(); e != nil {
@@ -988,12 +1004,20 @@ func decidePart(base geo.GeoInfo, res provider.Result, override bool) (geo.GeoIn
 		}
 	}
 
-	// 3. ISP：只补空，冲突只记录
-	if out.ISP == "" && res.ISP != "" {
-		out.ISP = res.ISP
-		k.isp++
-	} else if out.ISP != "" && res.ISP != "" && out.ISP != res.ISP {
-		ispConflict = true
+	// 3. ISP：空值直接补；两边都是"基础运营商"时以查询源（百度）为准。
+	// 其余情况保留原值——查询源给的 isp 经常是公司名（Alibaba (US)、Zenlayer、
+	// 微软公司…），拿它覆盖"阿里云/中国联通"只会更差。
+	if res.ISP != "" {
+		switch {
+		case out.ISP == "":
+			out.ISP = res.ISP
+			k.isp++
+		case out.ISP != res.ISP && isBasicCarrier(out.ISP) && isBasicCarrier(res.ISP):
+			out.ISP = res.ISP
+			k.isp++
+		case out.ISP != res.ISP:
+			ispConflict = true // 只记录，保留更具体的标签
+		}
 	}
 	return out, k, ispConflict
 }
@@ -1278,4 +1302,21 @@ func writeConflicts(path string, lines []string) error {
 		}
 	}
 	return nil
+}
+
+// basicCarriers 是"基础运营商"标签的特征词。查询源的 isp 字段混着运营商、
+// 公司名、机房名，只有落在这些词上才是我们要的运营商结论。
+var basicCarriers = []string{
+	"电信", "联通", "移动", "铁通", "广电", "教育网", "长城宽带", "鹏博士",
+	"中华电信", "台湾固网", "数位联合", "远传", "亚太电信", "香港宽频", "电讯盈科", "和记",
+}
+
+// isBasicCarrier 判断 ISP 标签是否是基础运营商（排除公司名/云/机房）。
+func isBasicCarrier(s string) bool {
+	for _, c := range basicCarriers {
+		if strings.Contains(s, c) {
+			return true
+		}
+	}
+	return false
 }

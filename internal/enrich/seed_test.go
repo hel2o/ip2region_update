@@ -42,7 +42,7 @@ func TestSeedFromDB(t *testing.T) {
 		mkSeg(300, 399, "江苏省", "", "中国电信"),    // 省冲突 → 不动
 		mkSeg(400, 499, "广东省", "广州市", "中国电信"), // 已有值 → 不动
 	}
-	fp, fc, err := SeedFromDB(segs, oldPath)
+	ups, fp, fc, err := SeedFromDB(segs, oldPath)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -51,6 +51,9 @@ func TestSeedFromDB(t *testing.T) {
 	}
 	if fc != 2 {
 		t.Fatalf("应补市 2 段，实际 %d", fc)
+	}
+	if len(ups) != 2 {
+		t.Fatalf("应产生 2 条落库更新，实际 %d", len(ups))
 	}
 	if segs[0].Geo.City != "桃园市" {
 		t.Fatalf("台湾段市应补为桃园市，实际 %q", segs[0].Geo.City)

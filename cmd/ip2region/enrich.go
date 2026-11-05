@@ -36,7 +36,7 @@ func runEnrich(args []string) error {
 	primary := fs.String("primary", "qifu", "主查询源: qifu（默认，失败自动回退 opendata）| opendata")
 	refresh := fs.Bool("refresh", false, "刷新模式：忽略换源前的历史缓存，全部重新查询（本次写入的缓存仍可断点续跑）")
 	adaptive := fs.Bool("adaptive", true, "自适应限速：延迟劣化/出错自动退避，健康时爬升（-qps 为上限）")
-	probeStep := fs.Int("probe-step", 512, "每多少 IP 布一个探测点（0=每段只探中点）")
+	probeStep := fs.Int("probe-step", 256, "每多少 IP 布一个探测点（0=每段只探中点）")
 	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点（0=不封顶）")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就与相邻片合并（0=不合并）")
 	probeJitter := fs.Float64("probe-jitter", 0.6, "探测点在片内的随机偏移比例 0~1（0=固定取中点/结果可复现；默认 0.6 每次采样不同）")
