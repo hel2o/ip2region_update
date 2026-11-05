@@ -22,6 +22,7 @@ func runMerge(args []string) error {
 	dbPath := fs.String("db", "data/ip2region.db", "SQLite 路径")
 	customDir := fs.String("custom", "data/custom", "自定义覆盖目录（*.txt）")
 	out := fs.String("out", "build/ip2region.txt", "输出 txt")
+	version := fs.String("version", "", "版本标记（写入 255.255.255.255，空=自动用当前时间）")
 	_ = fs.Parse(args)
 
 	db, err := store.Open(*dbPath)
@@ -54,6 +55,17 @@ func runMerge(args []string) error {
 		log.Printf("清洗字段（水印/重复层级）: %d 段", n)
 	}
 	merged = geo.Compact(merged)
+
+	// 版本探针：把 255.255.255.255（广播地址，永不命中真实 IP）单独切出来，
+	// region 写成 版本|日期|时间戳|||ip2region，加载端查这个 IP 即可识别库版本。
+	ver := *version
+	if ver == "" {
+		ver = time.Now().Format("2006-01-02 15:04")
+	}
+	if v, ok := injectVersionMarker(merged, ver); ok {
+		merged = v
+		log.Printf("版本标记: 255.255.255.255 → %s", ver)
+	}
 	if err := geo.Validate(merged); err != nil {
 		return fmt.Errorf("合并结果校验失败: %w", err)
 	}
@@ -210,4 +222,52 @@ func parseCustomGeo(s string) (geo.GeoInfo, error) {
 		Town: strings.TrimSpace(f[4]), ISP: strings.TrimSpace(f[5]),
 	}
 	return g, nil
+}
+
+// injectVersionMarker 把 255.255.255.255 切成独立的版本段。
+//
+// 段表必须覆盖全网段，所以不能删除这一 IP，只能从原来那段里切出来：
+//
+//	原: [x .. 255.255.255.255]
+//	新: [x .. 255.255.255.254] + [255.255.255.255] 版本段
+//
+// region 固定 6 段：版本|YYYYMMDD|YYYY-MM-DD HH:MM|||ip2region
+func injectVersionMarker(segs []geo.Segment, ver string) ([]geo.Segment, bool) {
+	const maxIP = uint32(0xFFFFFFFF)
+	for i := len(segs) - 1; i >= 0; i-- {
+		s := segs[i]
+		if s.End != maxIP {
+			continue
+		}
+		if s.Start == maxIP {
+			segs[i].Geo = versionGeo(ver)
+			return segs, true
+		}
+		day := ver
+		if len(ver) >= 10 {
+			day = strings.ReplaceAll(ver[:10], "-", "")
+		}
+		head := geo.Segment{Start: s.Start, End: maxIP - 1, Geo: s.Geo, Source: s.Source}
+		mark := geo.Segment{Start: maxIP, End: maxIP, Geo: versionGeo(ver), Source: "version"}
+		out := make([]geo.Segment, 0, len(segs)+1)
+		out = append(out, segs[:i]...)
+		out = append(out, head, mark)
+		out = append(out, segs[i+1:]...)
+		_ = day
+		return out, true
+	}
+	return segs, false
+}
+
+func versionGeo(ver string) geo.GeoInfo {
+	day := ver
+	if len(ver) >= 10 {
+		day = strings.ReplaceAll(ver[:10], "-", "")
+	}
+	return geo.GeoInfo{
+		Country:  "版本",
+		Province: day,
+		City:     ver,
+		ISP:      "ip2region",
+	}
 }
