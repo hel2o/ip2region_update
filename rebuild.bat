@@ -5,6 +5,8 @@ REM    rebuild.bat                            full rebuild (fetch + enrich + ref
 REM    rebuild.bat -skip-fetch                reuse local data, no download
 REM    rebuild.bat -skip-enrich -skip-refine  re-assemble only, no network
 REM    rebuild.bat -only-custom               only data\custom\*.txt changed: merge + build (no parse)
+REM    rebuild.bat -probe-jitter 0.6 -mask none  resample at different IPs (real queries, ~880k req)
+REM    rebuild.bat -probe-jitter 0.6 -probe-seed 123  same, reproducible (fixed sample)
 REM  Output: build\ip2region.xdb
 REM  Keep this file ASCII-only: cmd parses it with the OEM codepage.
 REM ============================================================

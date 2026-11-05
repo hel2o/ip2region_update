@@ -48,6 +48,7 @@ func runAll(args []string) error {
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就合并")
 	probeJitter := fs.Float64("probe-jitter", 0, "探测点片内随机偏移比例 0~1（0=固定中点）")
 	probeSeed := fs.Int64("probe-seed", 0, "抖动种子（0=每次运行随机）")
+	mask := fs.String("mask", "/24", "探测点去重粒度: /24 | /16 | none（抖动采样要绕过缓存时用 none）")
 
 	verifyN := fs.Int("verify-n", 100000, "verify 对拍抽样 IP 数（0 = 跳过对拍）")
 	onlyCustom := fs.Bool("only-custom", false, "只重跑 merge + build（仅改了 data/custom/*.txt 时用，不碰段表）")
@@ -110,6 +111,7 @@ func runAll(args []string) error {
 				"-min-piece", strconv.Itoa(*minPiece),
 				"-probe-jitter", strconv.FormatFloat(*probeJitter, 'f', -1, 64),
 				"-probe-seed", strconv.FormatInt(*probeSeed, 10),
+				"-mask", *mask,
 				"-adaptive", "true",
 			}
 			if *amapKey != "" {
