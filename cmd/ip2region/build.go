@@ -24,6 +24,7 @@ func runBuild(args []string) error {
 	src := fs.String("src", "build/ip2region.txt", "源 txt（--from txt 时为输入，--from db 时为导出路径）")
 	out := fs.String("out", "build/ip2region.xdb", "输出 xdb")
 	policy := fs.String("policy", "vector", "索引策略: vector | btree")
+	version := fs.String("version", "", "版本标记（写入 255.255.255.255，空=自动用当前时间）")
 	_ = fs.Parse(args)
 
 	switch *from {
@@ -43,6 +44,17 @@ func runBuild(args []string) error {
 		log.Printf("载入段表: %d 段", len(segs))
 		if n := sanitizeSegments(segs); n > 0 {
 			log.Printf("清洗字段（水印/重复层级）: %d 段", n)
+		}
+
+		// 版本探针：255.255.255.255 写成 版本|YYYYMMDD|时间，加载端据此识别库版本。
+		// txt 路径（merge 产物）已在 merge 阶段注入；这里覆盖 -from db 的直出路径。
+		ver := *version
+		if ver == "" {
+			ver = time.Now().Format("2006-01-02 15:04")
+		}
+		if v, ok := injectVersionMarker(segs, ver); ok {
+			segs = v
+			log.Printf("版本标记: 255.255.255.255 → %s", ver)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(*src), 0o755); err != nil {
