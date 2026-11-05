@@ -46,6 +46,8 @@ func runAll(args []string) error {
 	probeStep := fs.Int("probe-step", 512, "片内每多少 IP 布一个探测点")
 	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就合并")
+	probeJitter := fs.Float64("probe-jitter", 0, "探测点片内随机偏移比例 0~1（0=固定中点）")
+	probeSeed := fs.Int64("probe-seed", 0, "抖动种子（0=每次运行随机）")
 
 	verifyN := fs.Int("verify-n", 100000, "verify 对拍抽样 IP 数（0 = 跳过对拍）")
 	onlyCustom := fs.Bool("only-custom", false, "只重跑 merge + build（仅改了 data/custom/*.txt 时用，不碰段表）")
@@ -106,6 +108,8 @@ func runAll(args []string) error {
 				"-probe-step", strconv.Itoa(*probeStep),
 				"-probe-cap", strconv.Itoa(*probeCap),
 				"-min-piece", strconv.Itoa(*minPiece),
+				"-probe-jitter", strconv.FormatFloat(*probeJitter, 'f', -1, 64),
+				"-probe-seed", strconv.FormatInt(*probeSeed, 10),
 				"-adaptive", "true",
 			}
 			if *amapKey != "" {

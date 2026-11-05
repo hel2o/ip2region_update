@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"sort"
 	"strings"
@@ -50,6 +51,8 @@ type Options struct {
 	Fallback     provider.Provider // 备用源（高德）：只在主源没给省市时用
 	ProbeStep    int               // 每多少 IP 布一个探测点（0 = 每段只探中点）
 	ProbeCap     int               // 每个段最多探几个点（0 = 不封顶）
+	ProbeJitter  float64           // 探测点在片内的随机偏移比例（0 = 固定取中点）
+	ProbeSeed    int64             // 抖动种子（0 = 每次运行随机）
 	MinPiece     int               // GeoCN 切片小于该值就与相邻片合并（0 = 不合并）
 	CacheNames   []string          // 只复用这些 provider 的缓存；nil = 用 provider.CacheNames(p)
 }
@@ -132,6 +135,19 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	}
 
 	// 1. 组装 probe 列表（GeoCN 边界优先切片，片内再按 IP 数等分，最后按 /24 去重）
+	//
+	// 采样抖动：默认取片中点（确定性）。-probe-jitter > 0 时在片内随机取点，
+	// 每次运行采样位置不同，能探到固定网格漏掉的边界；-probe-seed 固定则同分布可复现。
+	jitter := opt.ProbeJitter
+	seed := opt.ProbeSeed
+	if jitter > 0 && seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+	if jitter > 0 {
+		log.Printf("采样抖动已启用：jitter=%.2f seed=%d（固定 seed 可复现，0 表示每次随机）", jitter, seed)
+	}
+	rnd := rand.New(rand.NewSource(seed))
+
 	byKey := map[uint32]*probe{}
 	var probes []*probe
 	for i := range segs {
@@ -142,7 +158,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		st.Segments++
 		for _, cell := range planPieces(opt, sg) {
 			a, b := cell[0], cell[1]
-			ip := uint32((uint64(a) + uint64(b)) / 2)
+			ip := probeIP(a, b, jitter, rnd)
 			key := ip & opt.Mask
 			pr, ok := byKey[key]
 			if !ok {
@@ -155,6 +171,17 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		}
 	}
 	st.Probes = len(probes)
+	if jitter > 0 && len(probes) > 0 {
+		n := len(probes)
+		if n > 3 {
+			n = 3
+		}
+		sample := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			sample = append(sample, geo.Uint2IP(probes[i].ip))
+		}
+		log.Printf("探测点样例（前 %d 个）: %s", n, strings.Join(sample, ", "))
+	}
 	log.Printf("待增强中国段 %d 个，按密度切出 %d 片，去重后探测点 %d 个（并发 %d，限速 %d QPS）",
 		st.Segments, st.Pieces, st.Probes, opt.Workers, opt.QPS)
 
@@ -969,6 +996,28 @@ func fillFromFallback(ctx context.Context, db *store.DB, opt Options, pr *probe,
 // segAgg 累积一个段的所有片。
 type segAgg struct {
 	pieces []geo.Segment
+}
+
+// probeIP 在片 [a,b] 内取一个探测点。
+//
+// jitter=0：取中点，完全确定性（老行为）。
+// jitter>0：向两侧随机偏移至多 jitter 倍的半片宽，位置每次运行不同。
+// 偏移量按片宽比例算，所以 /24 小片只小幅漂移、/16 大片能扫到不同区域。
+func probeIP(a, b uint32, jitter float64, rnd *rand.Rand) uint32 {
+	mid := uint32((uint64(a) + uint64(b)) / 2)
+	if jitter <= 0 || b <= a {
+		return mid
+	}
+	half := float64(b-a) / 2
+	d := (rnd.Float64()*2 - 1) * jitter * half
+	v := float64(mid) + d
+	if v < float64(a) {
+		v = float64(a)
+	}
+	if v > float64(b) {
+		v = float64(b)
+	}
+	return uint32(v)
 }
 
 // planPieces 决定一个段切成哪些区间来布探测点，返回闭区间列表（覆盖整段）。

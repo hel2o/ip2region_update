@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"math/rand"
 	"testing"
 
 	"github.com/hel2o/ip2region/internal/geo"
@@ -209,6 +210,41 @@ func TestFillPairKeepsProvinceCityConsistent(t *testing.T) {
 		if g.Province != c.wantProv || g.City != c.wantCity {
 			t.Errorf("%s: got %s|%s want %s|%s",
 				c.name, g.Province, g.City, c.wantProv, c.wantCity)
+		}
+	}
+}
+
+func TestProbeIPJitter(t *testing.T) {
+	a, b := uint32(1<<16), uint32(1<<16)+511
+	// jitter=0 永远是中点
+	if got := probeIP(a, b, 0, rand.New(rand.NewSource(1))); got != (a+b)/2 {
+		t.Fatalf("jitter=0 应取中点，得到 %d", got)
+	}
+	// 同种子结果可复现
+	r1 := rand.New(rand.NewSource(42))
+	r2 := rand.New(rand.NewSource(42))
+	for i := 0; i < 20; i++ {
+		if x, y := probeIP(a, b, 1, r1), probeIP(a, b, 1, r2); x != y {
+			t.Fatalf("同种子应复现同一序列: %d != %d", x, y)
+		}
+	}
+	// 不同种子采样点应不同（允许极小概率全同，用 50 个点降到可忽略）
+	r3 := rand.New(rand.NewSource(1))
+	r4 := rand.New(rand.NewSource(2))
+	diff := 0
+	for i := 0; i < 50; i++ {
+		if probeIP(a, b, 1, r3) != probeIP(a, b, 1, r4) {
+			diff++
+		}
+	}
+	if diff < 20 {
+		t.Fatalf("不同种子的采样点应明显不同，实际只有 %d/50 不同", diff)
+	}
+	// 永远落在片内
+	r5 := rand.New(rand.NewSource(7))
+	for i := 0; i < 500; i++ {
+		if got := probeIP(a, b, 1, r5); got < a || got > b {
+			t.Fatalf("探测点越界: %d 不在 [%d,%d]", got, a, b)
 		}
 	}
 }
