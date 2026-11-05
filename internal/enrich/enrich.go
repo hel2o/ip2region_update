@@ -55,6 +55,7 @@ type Options struct {
 	ProbeSeed    int64             // 抖动种子（0 = 每次运行随机）
 	MinPiece     int               // GeoCN 切片小于该值就与相邻片合并（0 = 不合并）
 	CacheNames   []string          // 只复用这些 provider 的缓存；nil = 用 provider.CacheNames(p)
+	SeedDB       string            // 上一轮库路径：enrich 前按其回填空省市（空=不回填）
 }
 
 // Stats 是执行统计。
@@ -124,7 +125,18 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	// source 标记用真实来源（qifu / baidu），不再写死 +baidu
 	srcTag := "+" + provider.ShortName(p)
 
-	// 0. 先用运营商网段表定 ISP（分配归属，比百度可靠）
+	// 0. 先用上一轮库回填空省市：全量重建时 parse 会重灌段表，
+	// 源后来查不到的历史积累（台湾城市、云段省市）只能靠旧库补回。
+	if opt.SeedDB != "" {
+		fp, fc, err := SeedFromDB(segs, opt.SeedDB)
+		if err != nil {
+			log.Printf("旧库回填失败（继续）: %v", err)
+		} else if fp > 0 || fc > 0 {
+			log.Printf("旧库回填: 补省 %d 段, 补市 %d 段", fp, fc)
+		}
+	}
+
+	// 0.1 先用运营商网段表定 ISP（分配归属，比百度可靠）
 	if opt.ISPTables != nil {
 		filled, fixed, err := applyISPTables(db, segs, opt.ISPTables, opt.DryRun)
 		if err != nil {
@@ -246,6 +258,44 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	var ctxStop atomic.Bool
 
 	var wg sync.WaitGroup
+	// 抖动点没拿到省市时补问该片中点：qifu 对不同 IP 的答案粒度不一致
+	// （台湾、云段尤其明显），只靠随机点会把原本有市的数据洗成空。
+	tryMid := func(pr *probe, res provider.Result) (provider.Result, bool) {
+		if opt.ProbeJitter <= 0 || len(pr.parts) == 0 {
+			return res, false
+		}
+		if res.Province != "" || res.City != "" {
+			return res, false
+		}
+		part := pr.parts[0]
+		mid := uint32((uint64(part.start) + uint64(part.end)) / 2)
+		if mid == pr.ip {
+			return res, false
+		}
+		select {
+		case <-stopCtx.Done():
+			return res, false
+		case <-tokens:
+		}
+		if opt.Limit > 0 && atomic.LoadInt64(&reqCount) >= int64(opt.Limit) {
+			return res, false
+		}
+		atomic.AddInt64(&reqCount, 1)
+		t0 := time.Now()
+		r2, err := p.Lookup(stopCtx, mid)
+		if actl != nil {
+			actl.Record(time.Since(t0), err != nil && !errors.Is(err, provider.ErrNoData))
+		}
+		if err != nil || (r2.Province == "" && r2.City == "") {
+			return res, false
+		}
+		_ = db.PutCache(store.CachedResult{
+			IP: mid, Provider: p.Name(), Province: r2.Province, City: r2.City,
+			District: r2.County, ISP: r2.ISP, Raw: r2.Raw, FetchedAt: time.Now().Unix(),
+		})
+		return r2, true
+	}
+
 	for w := 0; w < opt.Workers; w++ {
 		wg.Add(1)
 		go func() {
@@ -261,6 +311,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 						Province: cached.Province, City: cached.City,
 						County: cached.District, ISP: cached.ISP, Raw: cached.Raw,
 					}
+					res, _ = tryMid(pr, res)
 					res = fillFromFallback(stopCtx, db, opt, pr, res, tokens, &reqCount)
 					out <- probeResult{pr: pr, res: res, hit: true}
 					continue
@@ -283,6 +334,12 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 				if actl != nil {
 					// 无数据是正常应答（源承认查不到），不算拥塞信号
 					actl.Record(time.Since(t0), err != nil && !errors.Is(err, provider.ErrNoData))
+				}
+				// 抖动的点子没给省市 → 退回该片中点再问一次，拿到就按正常结果处理
+				if err == nil || provider.IsCacheable(err) {
+					if r2, used := tryMid(pr, res); used {
+						res, err = r2, nil
+					}
 				}
 				if err == nil {
 					res = fillFromFallback(stopCtx, db, opt, pr, res, tokens, &reqCount)

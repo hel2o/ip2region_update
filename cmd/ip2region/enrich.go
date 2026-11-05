@@ -41,6 +41,7 @@ func runEnrich(args []string) error {
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就与相邻片合并（0=不合并）")
 	probeJitter := fs.Float64("probe-jitter", 0.6, "探测点在片内的随机偏移比例 0~1（0=固定取中点/结果可复现；默认 0.6 每次采样不同）")
 	probeSeed := fs.Int64("probe-seed", 0, "抖动种子（0=每次运行随机；给固定值可复现同一次采样）")
+	seedDB := fs.String("seed-db", "", "上一轮库路径：enrich 前按其回填空省市（全量重建时防止丢历史积累）")
 	_ = fs.Parse(args)
 
 	m, err := parseMask(*mask)
@@ -138,6 +139,7 @@ func runEnrich(args []string) error {
 		ProbeStep:    *probeStep,
 		ProbeCap:     *probeCap,
 		ProbeJitter:  *probeJitter,
+		SeedDB:       *seedDB,
 		ProbeSeed:    *probeSeed,
 		MinPiece:     *minPiece,
 		CacheNames:   cacheNames,

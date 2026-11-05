@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -71,6 +73,22 @@ func runAll(args []string) error {
 		fmt.Printf("模式: 只更新自定义覆盖（复用段表，只跑 merge + build）\n")
 	}
 
+	// 全量重建会先跑 parse 重灌段表；先把当前库快照一份，供 enrich 回填空省市
+	// （源后来查不到的历史积累，如台湾城市、云段省市，否则会被洗掉）。
+	seedDBPath := "build/backup/prev.db"
+	if !*skipEnrich {
+		if _, err := os.Stat(*dbPath); err == nil {
+			if err := copyFile(*dbPath, seedDBPath); err != nil {
+				log.Printf("快照当前库失败（本次不回填）: %v", err)
+				seedDBPath = ""
+			} else {
+				log.Printf("已快照当前库: %s（enrich 前用于回填空省市）", seedDBPath)
+			}
+		} else {
+			seedDBPath = ""
+		}
+	}
+
 	var steps []allStep
 
 	if !*skipFetch {
@@ -112,7 +130,10 @@ func runAll(args []string) error {
 				"-probe-jitter", strconv.FormatFloat(*probeJitter, 'f', -1, 64),
 				"-probe-seed", strconv.FormatInt(*probeSeed, 10),
 				"-mask", *mask,
-				"-adaptive", "true",
+			}
+			a = append(a, "-adaptive", "true")
+			if seedDBPath != "" {
+				a = append(a, "-seed-db", seedDBPath)
 			}
 			if *amapKey != "" {
 				a = append(a, "-amap-key", *amapKey)
@@ -191,4 +212,25 @@ func humanSize(n int64) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// copyFile 复制文件（用于全量重建前快照当前库）。
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
