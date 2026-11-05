@@ -30,7 +30,7 @@ func main() {
 	defer cancel()
 
 	var (
-		mu       sync.Mutex
+		mu        sync.Mutex
 		latencies []float64 // 秒
 	)
 	var ok, fail int64
