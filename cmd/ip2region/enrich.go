@@ -39,7 +39,7 @@ func runEnrich(args []string) error {
 	probeStep := fs.Int("probe-step", 512, "每多少 IP 布一个探测点（0=每段只探中点）")
 	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点（0=不封顶）")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就与相邻片合并（0=不合并）")
-	probeJitter := fs.Float64("probe-jitter", 0, "探测点在片内的随机偏移比例 0~1（0=固定取中点；1=整片随机，每次运行采样点不同）")
+	probeJitter := fs.Float64("probe-jitter", 0.6, "探测点在片内的随机偏移比例 0~1（0=固定取中点/结果可复现；默认 0.6 每次采样不同）")
 	probeSeed := fs.Int64("probe-seed", 0, "抖动种子（0=每次运行随机；给固定值可复现同一次采样）")
 	_ = fs.Parse(args)
 

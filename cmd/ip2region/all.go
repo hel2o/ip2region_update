@@ -46,7 +46,7 @@ func runAll(args []string) error {
 	probeStep := fs.Int("probe-step", 512, "片内每多少 IP 布一个探测点")
 	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点")
 	minPiece := fs.Int("min-piece", 2048, "GeoCN 切片小于该值就合并")
-	probeJitter := fs.Float64("probe-jitter", 0, "探测点片内随机偏移比例 0~1（0=固定中点）")
+	probeJitter := fs.Float64("probe-jitter", 0.6, "探测点片内随机偏移比例 0~1（0=固定中点/可复现，默认 0.6 每次不同）")
 	probeSeed := fs.Int64("probe-seed", 0, "抖动种子（0=每次运行随机）")
 	mask := fs.String("mask", "/24", "探测点去重粒度: /24 | /16 | none（抖动采样要绕过缓存时用 none）")
 
