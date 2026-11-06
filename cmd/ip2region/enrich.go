@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,6 +36,8 @@ func runEnrich(args []string) error {
 	amapKey := fs.String("amap-key", os.Getenv("AMAP_KEY"), "高德 Web 服务 Key（只用于补百度缺失的省市，留空则不启用）")
 	primary := fs.String("primary", "qifu", "主查询源: qifu（默认，失败自动回退 opendata）| opendata")
 	refresh := fs.Bool("refresh", false, "刷新模式：忽略换源前的历史缓存，全部重新查询（本次写入的缓存仍可断点续跑）")
+	onlyBaidu := fs.Bool("only-baidu", false, "定向刷新：只重查\"旧百度 API 单独提供\"的段（source 含 +baidu 且无 +qifu），自动忽略旧百度缓存")
+	onlyHMT := fs.Bool("only-hmt", false, "定向修正：只重查与港澳台地域表有交集但归属不符的段")
 	adaptive := fs.Bool("adaptive", true, "自适应限速：延迟劣化/出错自动退避，健康时爬升（-qps 为上限）")
 	probeStep := fs.Int("probe-step", 256, "每多少 IP 布一个探测点（0=每段只探中点）")
 	probeCap := fs.Int("probe-cap", 1024, "每个段最多几个探测点（0=不封顶）")
@@ -61,6 +64,68 @@ func runEnrich(args []string) error {
 	}
 	if len(segs) == 0 {
 		return fmt.Errorf("段表为空，请先执行 parse")
+	}
+
+	// 港澳台地域表（与运营商网段表同目录）：归属地优先级第二。
+	var hmt *ispip.Table
+	if *ispDir != "" {
+		if _, statErr := os.Stat(*ispDir); statErr == nil {
+			hmt, err = ispip.LoadRegionTable(*ispDir)
+			if err != nil {
+				return err
+			}
+			log.Printf("港澳台地域表: %d 条 CIDR / 合并后 %d 段（归属优先级: 自定义 > 港澳台表 > 查询源）",
+				hmt.Networks, hmt.PieceCount())
+		}
+	}
+
+	// 定向修正：只处理与港澳台地域表有交集、但归属不一致的段。
+	// 典型：qqwry/qifu 把香港 IP 判成美国（72.255.243.92 → 72.255.224.0/19）。
+	if *onlyHMT {
+		if hmt == nil {
+			return fmt.Errorf("-only-hmt 需要港澳台地域表（检查 -ispip 目录 %s）", *ispDir)
+		}
+		before := len(segs)
+		filtered := segs[:0]
+		var ips int64
+		for _, sg := range segs {
+			if !hmt.Intersects(sg.Start, sg.End) {
+				continue
+			}
+			if prov, full := hmt.FullyCovers(sg.Start, sg.End); full &&
+				sg.Geo.Country == "中国" && sg.Geo.Province == prov {
+				continue // 已经正确
+			}
+			filtered = append(filtered, sg)
+			ips += int64(sg.End) - int64(sg.Start) + 1
+		}
+		segs = filtered
+		if len(segs) == 0 {
+			return fmt.Errorf("没有需要修正的港澳台段")
+		}
+		log.Printf("定向修正：港澳台相关段 %d 个（共 %d 段，%.1f 万个 IP）", len(segs), before, float64(ips)/10000)
+	}
+
+	// 定向刷新：只处理"旧百度 API（opendata）单独提供、未经过 qifu 校验"的段。
+	// 这些段的省市是历史源给的，tag 里是 +baidu 且没有 +qifu（+qifu-nocity 也算经过 qifu）。
+	// 处理时先把 +baidu 标记摘掉，让本轮写入的 +qifu 成为唯一来源标记，
+	// 下次再查"baidu-only"就不会重复命中。
+	if *onlyBaidu {
+		before := len(segs)
+		filtered := segs[:0]
+		var ips int64
+		for _, sg := range segs {
+			if strings.Contains(sg.Source, "+baidu") && !strings.Contains(sg.Source, "+qifu") {
+				sg.Source = strings.ReplaceAll(sg.Source, "+baidu", "")
+				filtered = append(filtered, sg)
+				ips += int64(sg.End) - int64(sg.Start) + 1
+			}
+		}
+		segs = filtered
+		if len(segs) == 0 {
+			return fmt.Errorf("没有需要刷新的 baidu-only 段")
+		}
+		log.Printf("定向刷新：baidu-only 段 %d 个（共 %d 段，%.1f 万个 IP）", len(segs), before, float64(ips)/10000)
 	}
 
 	var ispTables *ispip.Table
@@ -110,8 +175,9 @@ func runEnrich(args []string) error {
 	}
 
 	// 刷新模式：只复用本次来源写入的缓存，历史上的旧源结果一律重查。
+	// -only-baidu 天然属于刷新：旧百度缓存必须绕开，否则查出来还是老数据。
 	var cacheNames []string
-	if *refresh {
+	if *refresh || *onlyBaidu {
 		cacheNames = []string{p.Name()}
 		log.Printf("刷新模式：忽略 provider≠%q 的历史缓存，全部重新查询", p.Name())
 	}
@@ -143,6 +209,8 @@ func runEnrich(args []string) error {
 		ProbeSeed:    *probeSeed,
 		MinPiece:     *minPiece,
 		CacheNames:   cacheNames,
+		ForceTag:     *onlyBaidu || *onlyHMT,
+		HMT:          hmt,
 	})
 
 	fmt.Println("---- enrich 统计 ----")

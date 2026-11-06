@@ -57,7 +57,7 @@ func runMerge(args []string) error {
 	merged = geo.Compact(merged)
 
 	// 版本探针：把 255.255.255.255（广播地址，永不命中真实 IP）单独切出来，
-	// region 写成 版本|日期|时间戳|||ip2region，加载端查这个 IP 即可识别库版本。
+	// region 写成 |YYYYMMDD|时刻|||（标准 6 段、国家留空），加载端查这个 IP 即可识别库版本。
 	ver := *version
 	if ver == "" {
 		ver = time.Now().Format("2006-01-02 15:04")
@@ -231,7 +231,8 @@ func parseCustomGeo(s string) (geo.GeoInfo, error) {
 //	原: [x .. 255.255.255.255]
 //	新: [x .. 255.255.255.254] + [255.255.255.255] 版本段
 //
-// region 固定 6 段：版本|YYYYMMDD|YYYY-MM-DD HH:MM|||ip2region
+// region 用标准 6 段格式，国家留空：|YYYYMMDD|YYYY-MM-DD HH:MM|||
+// 加载端查 255.255.255.255，parts[0]=="" 且 parts[1] 是 8 位日期即版本段。
 func injectVersionMarker(segs []geo.Segment, ver string) ([]geo.Segment, bool) {
 	const maxIP = uint32(0xFFFFFFFF)
 	for i := len(segs) - 1; i >= 0; i-- {
@@ -264,10 +265,11 @@ func versionGeo(ver string) geo.GeoInfo {
 	if len(ver) >= 10 {
 		day = strings.ReplaceAll(ver[:10], "-", "")
 	}
+	// 标准 6 段格式，国家/区县/镇/ISP 全留空：
+	// |YYYYMMDD|YYYY-MM-DD HH:MM|||
+	// 加载端判断：parts[0]=="" 且 parts[1] 为 8 位日期即版本段。
 	return geo.GeoInfo{
-		Country:  "版本",
 		Province: day,
 		City:     ver,
-		ISP:      "ip2region",
 	}
 }

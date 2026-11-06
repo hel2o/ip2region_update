@@ -56,6 +56,8 @@ type Options struct {
 	MinPiece     int               // GeoCN 切片小于该值就与相邻片合并（0 = 不合并）
 	CacheNames   []string          // 只复用这些 provider 的缓存；nil = 用 provider.CacheNames(p)
 	SeedDB       string            // 上一轮库路径：enrich 前按其回填空省市（空=不回填）
+	ForceTag     bool              // 处理过的段一律打上本来源标记（定向刷新用；否则"值没变"不写库，标记会丢）
+	HMT          *ispip.Table      // 港澳台地域表：归属地优先级第二（自定义 > 港澳台 > 查询源），Lookup 返回省份名
 }
 
 // Stats 是执行统计。
@@ -146,7 +148,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 	var probes []*probe
 	for i := range segs {
 		sg := &segs[i]
-		if sg.Geo.Country != "中国" {
+		if sg.Geo.Country != "中国" && !hmtSelected(opt.HMT, sg) {
 			continue
 		}
 		st.Segments++
@@ -176,7 +178,7 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 		}
 		log.Printf("探测点样例（前 %d 个）: %s", n, strings.Join(sample, ", "))
 	}
-	log.Printf("待增强中国段 %d 个，按密度切出 %d 片，去重后探测点 %d 个（并发 %d，限速 %d QPS）",
+	log.Printf("待增强中国/港澳台段 %d 个，按密度切出 %d 片，去重后探测点 %d 个（并发 %d，限速 %d QPS）",
 		st.Segments, st.Pieces, st.Probes, opt.Workers, opt.QPS)
 
 	// 2. 限速器：固定速率或自适应（拥塞控制式，-qps 是上限）
@@ -397,6 +399,9 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 				for _, part := range r.pr.parts {
 					sg := &segs[part.idx]
 					ng, kinds, ispConf := decidePart(sg.Geo, r.res, opt.Override)
+					if opt.HMT != nil {
+						kinds.prov += applyHMT(&ng, opt.HMT, r.pr.ip, r.res)
+					}
 
 					st.ProvFixed += kinds.prov
 					st.CityFixed += kinds.city
@@ -419,6 +424,11 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 					}
 					if noGeo {
 						src = TagSource(src, srcTag+noCitySuffix)
+					}
+					// 定向刷新：本轮查过的段都要留痕，哪怕值没变——
+					// 否则下次仍会被当成"未验证段"重复选中。
+					if opt.ForceTag {
+						src = TagSource(src, srcTag)
 					}
 					a := aggs[part.idx]
 					if a == nil {
@@ -1312,6 +1322,43 @@ var basicCarriers = []string{
 }
 
 // isBasicCarrier 判断 ISP 标签是否是基础运营商（排除公司名/云/机房）。
+// hmtSelected 判断非中国段是否因港澳台表入选增强：
+// 与表有交集、且没有"整段落在正确省份里"的才算需要修正。
+func hmtSelected(hmt *ispip.Table, sg *geo.Segment) bool {
+	if hmt == nil || !hmt.Intersects(sg.Start, sg.End) {
+		return false
+	}
+	if prov, full := hmt.FullyCovers(sg.Start, sg.End); full &&
+		sg.Geo.Country == "中国" && sg.Geo.Province == prov {
+		return false // 已经是对的，不用再探
+	}
+	return true
+}
+
+// applyHMT 港澳台地域表覆盖，归属地优先级第二（自定义 > 港澳台 > 查询源 > qqwry）。
+//
+// 探测点落在港澳台段里，省份就必须是表里的值——即使 qifu/百度把它判成别的
+// 国家或省份（真实案例：72.255.243.92 被 qqwry/qifu 判成美国加州，
+// ispip 香港表说 72.255.224.0/19 是香港）。纠正时挂错的市/区县/镇一并清掉；
+// 旧 ISP 来自错误的国家归属，直接换成查询源对这个 IP 的回答（空就留着空）。
+// 返回修正的省计数（并进 ProvFixed 统计）。
+func applyHMT(ng *geo.GeoInfo, hmt *ispip.Table, ip uint32, res provider.Result) int {
+	prov := hmt.Lookup(ip)
+	if prov == "" {
+		return 0
+	}
+	if ng.Country != "中国" {
+		ng.Country = "中国"
+	}
+	if ng.Province == prov {
+		return 0
+	}
+	ng.Province = prov
+	ng.City, ng.County, ng.Town = "", "", ""
+	ng.ISP = res.ISP
+	return 1
+}
+
 func isBasicCarrier(s string) bool {
 	for _, c := range basicCarriers {
 		if strings.Contains(s, c) {

@@ -46,8 +46,8 @@ func runBuild(args []string) error {
 			log.Printf("清洗字段（水印/重复层级）: %d 段", n)
 		}
 
-		// 版本探针：255.255.255.255 写成 版本|YYYYMMDD|时间，加载端据此识别库版本。
-		// txt 路径（merge 产物）已在 merge 阶段注入；这里覆盖 -from db 的直出路径。
+		// 版本探针：255.255.255.255 写成 |YYYYMMDD|时刻|||（标准 6 段、国家留空），
+		// 加载端据此识别库版本。txt 路径（merge 产物）已在 merge 阶段注入；这里覆盖 -from db 的直出路径。
 		ver := *version
 		if ver == "" {
 			ver = time.Now().Format("2006-01-02 15:04")

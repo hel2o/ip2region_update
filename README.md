@@ -300,6 +300,16 @@ go run ./cmd/ip2region legacy -xdb old.xdb -include-cn         # 连国内一起
 > 零错误；持续超 60 QPS 会出现尾部延迟爆炸 + 偶发 25s 超时，建议控在 20~45 QPS。
 > 软限流可能返回 HTTP 200 + 空 body，客户端已按失败处理。
 
+**港澳台归属优先级：自定义 > ispip 港澳台表 > qifu/百度 > qqwry。**
+
+`data/ispip` 里的 `hongkong.html` / `macau.html` / `taiwan.html` 是该地区的全部 CIDR
+（每天更新），enrich 默认加载它们做"归属地第二优先级"：探测点落在这三个表里，
+省份就强制为 `中国|香港特别行政区` / `中国|澳门特别行政区` / `中国|台湾省`，
+即使 qifu/百度/qqwry 把它判成别的国家（真实案例：72.255.243.92 在香港表的
+`72.255.224.0/19` 里，但被 qqwry/qifu 判成美国加州）。纠正时挂错的市/区县/镇
+一并清掉，ISP 换成查询源对该 IP 的回答。与表有交集但归属不符的段会自动进入
+全量 enrich；一次性集中修正用 `enrich -only-hmt`。
+
 **探测布线：GeoCN 边界优先，片内再按 IP 数等分。**
 
 按 IP 数机械等分的问题在于切点跟真实归属无关。GeoCN 的网段边界来自真实分配记录，
@@ -355,6 +365,7 @@ go run ./cmd/ip2region enrich -only-empty
 | `-probe-seed` | 0 | 抖动种子：0=每次运行随机，固定值可复现同一次采样 |
 | `-min-piece` | 2048 | GeoCN 切片小于该值就与相邻片合并 |
 | `-only-empty` | false | 只处理省市缺失的段 |
+| `-only-hmt` | false | 定向修正：只重查与港澳台地域表有交集但归属不符的段 |
 | `-conflicts` | `build/enrich-conflicts.tsv` | ISP 冲突样例输出，空字符串则不写 |
 | `-timeout` | 10s | 单请求超时 |
 | `-progress` | 2000 | 每 N 条打一行进度 |
@@ -589,11 +600,14 @@ go run ./cmd/ip2region merge -custom data/custom -out build/ip2region.txt
 
 `255.255.255.255` 是广播地址，任何真实查询都不会命中，用它当版本哨兵。出库时把
 原本覆盖它的那段切成两段（`[x..255.255.255.254]` 保持原值 + `[255.255.255.255]`
-单独成段），region 写成：
+单独成段），region 用**标准 6 段格式，国家留空**：
 
 ```
-255.255.255.255|255.255.255.255|版本|20261105|2026-11-05 15:31|||ip2region
+255.255.255.255|255.255.255.255||20261105|2026-11-05 15:31|||
 ```
+
+即查询返回 `|20261105|2026-11-05 15:31|||`：省字段=版本日期（YYYYMMDD），
+市字段=生成时刻，其余全空。
 
 两条出库路径都会自动注入，时间取**执行出库的那一刻**：
 
@@ -602,22 +616,23 @@ go run ./cmd/ip2region merge -custom data/custom -out build/ip2region.txt
 | `merge`（`all` / `-only-custom` 都经过） | 写 `build/ip2region.txt` 时 |
 | `build -from db`（跳过 merge 的直出） | 导出 txt 时 |
 
-想写入自定义版本号（例如带数据批次）：`merge -version "数据20261105"` 或
-`build -version "..."`，不传则自动取当前时间。
+想写入自定义版本号：`merge -version "2026-11-05 16:00"`，不传则自动取当前时间。
 
 加载端读法：
 
 ```go
 region, _ := searcher.Search([]byte("255.255.255.255"))
 parts := strings.Split(region, "|")
-if len(parts) >= 3 && parts[0] == "版本" {
+// 标准 6 段：国家留空 + 省字段为 8 位日期
+if len(parts) >= 3 && parts[0] == "" && isVersionDay(parts[1]) && parts[2] != "" {
     version := parts[1] // 20261105，机器可比
     builtAt := parts[2] // 2026-11-05 15:31
 }
 ```
 
-**必须先判断 `parts[0] == "版本"`**：老库查这个 IP 返回的是
-`纯真网络|||||保留地址`，不判断会把"纯真网络"误当成版本号。
+**判定依据是 `parts[0]=="" 且 parts[1] 为 8 位数字`**：真实段的国家不可能为空，
+老探针库返回 `版本|YYYYMMDD|...|||ip2region`，更老的纯真库返回
+`纯真网络|||||保留地址`——三种都能区分开，不会误判。
 
 验证方式：`ip2region.exe look -xdb build/ip2region.xdb 255.255.255.255`
 （不加 `-xdb` 查的是 SQLite 段表，那里没有探针）。
