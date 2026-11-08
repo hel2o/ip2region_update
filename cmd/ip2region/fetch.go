@@ -110,13 +110,15 @@ func runFetch(args []string) error {
 	return nil
 }
 
-// fetchISPIP 下载 ispip.m27.tech 的各运营商网段表。
+// fetchISPIP 下载 ispip.m27.tech 的各运营商网段表 + 港澳台地域表。
 // 页面正文就是纯 CIDR 列表，直接原样存盘，交给 ispip 包解析。
+// 港澳台三页（hongkong/macau/taiwan）不做 ISP，只做归属地（见 ispip.LoadRegionTable），
+// 但 enrich 默认要用，所以一起下。
 func fetchISPIP(c *http.Client, dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	keys := ispip.PageKeys()
+	keys := append(ispip.PageKeys(), ispip.RegionFiles()...)
 	ok, fail := 0, 0
 	for _, k := range keys {
 		url := ispip.SourceURL + k + ".html"

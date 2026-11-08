@@ -79,6 +79,8 @@ type Stats struct {
 	CityFixed      int
 	ISPFilled      int
 	Conflicts      int
+	HMTProvFixed   int // 港澳台表修正的省
+	HMTISPFixed    int // 港澳台表段按查询源刷新的 ISP
 	Elapsed        time.Duration
 	CursorStop     uint32 // 中断时的进度游标（0 表示正常跑完）
 }
@@ -400,7 +402,11 @@ func Run(ctx context.Context, db *store.DB, p provider.Provider, segs []geo.Segm
 					sg := &segs[part.idx]
 					ng, kinds, ispConf := decidePart(sg.Geo, r.res, opt.Override)
 					if opt.HMT != nil {
-						kinds.prov += applyHMT(&ng, opt.HMT, r.pr.ip, r.res)
+						hp, hi := applyHMT(&ng, opt.HMT, r.pr.ip, r.res)
+						kinds.prov += hp
+						kinds.isp += hi
+						st.HMTProvFixed += hp
+						st.HMTISPFixed += hi
 					}
 
 					st.ProvFixed += kinds.prov
@@ -1341,22 +1347,32 @@ func hmtSelected(hmt *ispip.Table, sg *geo.Segment) bool {
 // 国家或省份（真实案例：72.255.243.92 被 qqwry/qifu 判成美国加州，
 // ispip 香港表说 72.255.224.0/19 是香港）。纠正时挂错的市/区县/镇一并清掉；
 // 旧 ISP 来自错误的国家归属，直接换成查询源对这个 IP 的回答（空就留着空）。
-// 返回修正的省计数（并进 ProvFixed 统计）。
-func applyHMT(ng *geo.GeoInfo, hmt *ispip.Table, ip uint32, res provider.Result) int {
+//
+// ISP 规则（港澳台例外）：百度给的是运营商名（电讯盈科/中华电信/澳门电讯），
+// 纯真的港澳台 ISP 常是陈年公司名甚至是境外 ISP（Charter Communications、
+// iBAHN网络），所以这里不套用大陆那套"非基础运营商不覆盖"的门控——
+// 港澳台只要查询源有 ISP，就以查询源为准。
+//
+// 返回（修正省数，修正 ISP 数）。
+func applyHMT(ng *geo.GeoInfo, hmt *ispip.Table, ip uint32, res provider.Result) (provFixed, ispFixed int) {
 	prov := hmt.Lookup(ip)
 	if prov == "" {
-		return 0
+		return 0, 0
 	}
 	if ng.Country != "中国" {
 		ng.Country = "中国"
 	}
-	if ng.Province == prov {
-		return 0
+	if ng.Province != prov {
+		ng.Province = prov
+		ng.City, ng.County, ng.Town = "", "", ""
+		ng.ISP = res.ISP
+		return 1, 1
 	}
-	ng.Province = prov
-	ng.City, ng.County, ng.Town = "", "", ""
-	ng.ISP = res.ISP
-	return 1
+	if res.ISP != "" && ng.ISP != res.ISP {
+		ng.ISP = res.ISP
+		ispFixed = 1
+	}
+	return 0, ispFixed
 }
 
 func isBasicCarrier(s string) bool {

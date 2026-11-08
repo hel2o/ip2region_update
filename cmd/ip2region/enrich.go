@@ -79,8 +79,9 @@ func runEnrich(args []string) error {
 		}
 	}
 
-	// 定向修正：只处理与港澳台地域表有交集、但归属不一致的段。
-	// 典型：qqwry/qifu 把香港 IP 判成美国（72.255.243.92 → 72.255.224.0/19）。
+	// 定向修正：处理所有与港澳台地域表有交集的段。
+	// 一是修归属（qqwry/qifu 把香港 IP 判成美国，72.255.243.92 → 72.255.224.0/19），
+	// 二是刷 ISP（港澳台 ISP 以百度为准，纯真常留陈年公司名/境外 ISP）。
 	if *onlyHMT {
 		if hmt == nil {
 			return fmt.Errorf("-only-hmt 需要港澳台地域表（检查 -ispip 目录 %s）", *ispDir)
@@ -91,10 +92,6 @@ func runEnrich(args []string) error {
 		for _, sg := range segs {
 			if !hmt.Intersects(sg.Start, sg.End) {
 				continue
-			}
-			if prov, full := hmt.FullyCovers(sg.Start, sg.End); full &&
-				sg.Geo.Country == "中国" && sg.Geo.Province == prov {
-				continue // 已经正确
 			}
 			filtered = append(filtered, sg)
 			ips += int64(sg.End) - int64(sg.Start) + 1
@@ -230,6 +227,8 @@ func runEnrich(args []string) error {
 	fmt.Printf("清空旧区县          : %d\n", st.CountyCleared)
 	fmt.Printf("GeoCN 省市不一致放弃: %d\n", st.GeoCNConflict)
 	fmt.Printf("ISP 冲突(仅记录)    : %d\n", st.Conflicts)
+	fmt.Printf("港澳台修正省        : %d\n", st.HMTProvFixed)
+	fmt.Printf("港澳台刷新 ISP      : %d\n", st.HMTISPFixed)
 	fmt.Printf("耗时                : %s\n", st.Elapsed.Round(time.Millisecond))
 
 	if errors.Is(err, provider.ErrBlocked) {

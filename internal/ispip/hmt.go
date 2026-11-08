@@ -69,6 +69,11 @@ func LoadRegionTable(dir string) (*Table, error) {
 	return t, nil
 }
 
+// RegionFiles 返回港澳台地域表的页面名（不含扩展名，供 fetch 拼 URL 和文件名）。
+func RegionFiles() []string {
+	return []string{"hongkong", "macau", "taiwan"}
+}
+
 // Intersects 判断 [start,end] 是否与表内任一区间有交集。
 func (t *Table) Intersects(start, end uint32) bool {
 	i := sortSearchUint32(t.starts, start)

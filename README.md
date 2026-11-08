@@ -1,9 +1,10 @@
 # ip2region 归属库构建工具
 
 把纯真 `qqwry.dat` 转成 [ip2region](https://github.com/lionsoul2014/ip2region) 的 `.xdb`，
-中间用百度 IP 接口补齐缺失的省/市/ISP，再叠加你自己的手工覆盖规则。
+中间用百度 IP 接口补齐/纠正省/市/ISP、用 GeoCN 补区县、用 ispip 港澳台表修归属，
+再叠加你自己的手工覆盖规则。
 
-产出是一个 22MB 左右的单文件库，覆盖全部 42.9 亿个 IPv4 地址，无缝隙、无重叠。
+产出是一个约 60MB 的单文件库（300 万段），覆盖全部 42.9 亿个 IPv4 地址，无缝隙、无重叠。
 
 ```
 $ ip2region look --xdb build/ip2region.xdb 183.3.149.185
@@ -24,7 +25,7 @@ $ ip2region look --xdb build/ip2region.xdb 183.3.149.185
 - [流水线详解](#流水线详解)
   - [fetch：下载最新数据](#fetch下载最新数据)
   - [parse：解析成段表](#parse解析成段表)
-  - [enrich：百度补空](#enrich百度补空)
+  - [enrich：百度判省市 + 港澳台纠正](#enrich百度补空)
   - [refine：边界递归收敛](#refine边界递归收敛)
   - [merge：叠加自定义覆盖](#merge叠加自定义覆盖)
   - [build：生成-xdb](#build生成-xdb)
@@ -32,7 +33,7 @@ $ ip2region look --xdb build/ip2region.xdb 183.3.149.185
   - [stats：质量报表](#stats质量报表)
   - [look：查询调试](#look查询调试)
   - [serve：查询页面（核验数据）](#serve查询页面核验数据)
-- [发布更新](#发布更新同步到-xdb-仓库)
+- [发布更新](#发布更新github-release--同步上线)
 - [自定义覆盖规则](#自定义覆盖规则)
 - [缓存与断点续跑](#缓存与断点续跑)
 - [数据质量与已知限制](#数据质量与已知限制)
@@ -51,9 +52,9 @@ $ ip2region look --xdb build/ip2region.xdb 183.3.149.185
 # 1. 更新纯真数据（可选，一个月一次足够）
 go run ./cmd/ip2region fetch
 
-# 2. 重新解析 + 补空（有缓存，几十秒）
+# 2. 重新解析 + 增强（有缓存，约 1 分钟）
 go run ./cmd/ip2region parse
-go run ./cmd/ip2region enrich -qps 60
+go run ./cmd/ip2region enrich
 
 # 3. 叠加自定义覆盖 → 生成 xdb
 go run ./cmd/ip2region merge
@@ -71,7 +72,7 @@ go run ./cmd/ip2region stats
 ```bash
 go run ./cmd/ip2region fetch          # 下载 qqwry.dat（约 27MB）
 go run ./cmd/ip2region parse          # 解析 → 141 万段，约 10 秒
-go run ./cmd/ip2region enrich -qps 60 # 百度判省市 + 补空，25 万探测点
+go run ./cmd/ip2region enrich      # 百度判省市 + 港澳台纠正（默认 100 QPS 自适应，45~50 分钟）
 go run ./cmd/ip2region refine -qps 60 # 边界递归收敛到 /24
 go run ./cmd/ip2region merge          # 叠加 data/custom/*.txt
 go run ./cmd/ip2region build -from txt
@@ -125,7 +126,7 @@ go run ./cmd/ip2region all                # 或 build/ip2region all
 
 常用开关：`-skip-fetch`、`-skip-legacy`、`-skip-enrich`、`-skip-refine`、`-verify-n 0`
 （跳过对拍）、`-only-custom`（只跑 merge + build）、`-db` / `-txt` / `-out`（换路径）、
-`-qps` / `-workers`（限速与并发）。`all -h` 看全部。
+`-qps` / `-workers`（限速与并发）、`-probe-step`（默认 256）/ `-probe-jitter`（默认 0.6）/ `-mask`（默认 /24）。`all -h` 看全部。
 
 > 注意：`all` 里的 `parse` 会重建段表（等于清空后重灌），自定义覆盖在 `merge` 阶段
 > 重新叠加，所以不用担心丢规则；但**手工改过 SQLite 段表**的话会被覆盖，改完请另行备份。
@@ -168,7 +169,7 @@ rebuild.bat -only-custom        :: 或 ./rebuild.sh -only-custom
   想降到更低版本需要同时降这两个依赖
 - 无需 CGO：SQLite 用纯 Go 驱动 `modernc.org/sqlite`，Windows 上直接编译，不用装 gcc
 - 能访问 `raw.githubusercontent.com`、`github.com`（下载 qqwry 与 GeoCN）、
-  `ispip.m27.tech`（下载运营商网段表）、`opendata.baidu.com`（补空）
+  `ispip.m27.tech`（下载运营商/港澳台网段表）、`qifu.baidu.com` + `opendata.baidu.com`（查询源）
 - 磁盘约 200MB（qqwry.dat 27MB + SQLite 300MB 左右，缓存表是主要占用）
 
 ```bash
@@ -181,14 +182,14 @@ go build ./cmd/ip2region    # 也可以编译成单二进制
 
 | 命令 | 作用 | 产物 | 耗时（实测） |
 |---|---|---|---|
-| `all` | 一键跑完整条流水线（下面 9 步按序） | `build/ip2region.xdb` | 首次 30~60 分钟，缓存后 1 分钟 |
-| `fetch` | 下载 `qqwry.dat` + 网段表 + GeoCN | `data/qqwry.dat`、`data/ispip/`、`data/geocn/` | 40 秒 |
+| `all` | 一键跑完整条流水线（fetch→parse→legacy→enrich→refine→merge→build→verify） | `build/ip2region.xdb` | 首次 45~60 分钟，缓存后 1 分钟 |
+| `fetch` | 下载 `qqwry.dat` + 网段表（含港澳台三页）+ GeoCN | `data/qqwry.dat`、`data/ispip/`、`data/geocn/` | 40 秒~1 分钟 |
 | `parse` | 解析 dat，拆省市区镇，落 SQLite | `data/ip2region.db` | 10 秒 |
 | `legacy` | 用旧版 xdb 补境外缺失的省市 | 改写段表 | 30 秒 |
-| `enrich` | 调百度补省市/ISP | 改写段表 + `ip_cache` | 首次 30 分钟，缓存后 25 秒 |
+| `enrich` | 调百度判省市/ISP（含港澳台地域表纠正） | 改写段表 + `ip_cache` | 首次 45~50 分钟，缓存后约 1 分钟 |
 | `refine` | 大段边界递归收敛到 /24 | 段表拆分 | 首次约 20 秒（多为缓存命中） |
-| `merge` | 叠加 `data/custom/*.txt` | `build/ip2region.txt` | 1 秒 |
-| `build` | 调官方 maker 生成 xdb | `build/ip2region.xdb` | 9 秒 |
+| `merge` | 叠加 `data/custom/*.txt` + 注入版本探针 | `build/ip2region.txt` | 2 秒 |
+| `build` | 调官方 maker 生成 xdb | `build/ip2region.xdb` | 20 秒 |
 | `verify` | 校验全覆盖 + 与旧库对拍 | 控制台报告 | 5 秒 |
 | `stats` | 字段覆盖率报表 | 控制台报告 | 1 秒 |
 | `look` | 查询单个 IP | 控制台输出 | 即时 |
@@ -205,11 +206,13 @@ data/qqwry.dat
    │  parse     GBK→UTF8，拆省/市/区/镇/ISP，规范化成全覆盖段表
    ▼
 data/ip2region.db (SQLite)     ← 段表 + 请求缓存，缓存即断点
-   │  enrich    全段 /24 去重 + 中点探测，只补空
+   │  enrich    按 GeoCN 边界切片 → 片内 step=256 布点（可抖动）→ 百度判省/市；
+   │            港澳台段按 ispip 地域表强制省份、ISP 以百度为准；
+   │            最后用运营商网段表补空 ISP
    │  refine    大段边界递归收敛，只往"结论不同"的半边收敛到 /24
    ▼
 build/ip2region.txt
-   │  merge     叠加 data/custom/*.txt（优先级最高）
+   │  merge     叠加 data/custom/*.txt（优先级最高），注入版本探针
    │  build     调官方 xdb maker
    ▼
 build/ip2region.xdb
@@ -223,11 +226,12 @@ go run ./cmd/ip2region fetch -out /tmp/qqwry.dat   # 下到别处
 go run ./cmd/ip2region fetch -force                # 内容相同也重写
 ```
 
-一次做两件事：
+一次做三件事：
 
 1. 从 `metowolf/qqwry.dat` 的 release 拉最新 dat，先下到临时文件，校验体积（≥10MB）和 md5
    后才原子替换，内容没变就不动
-2. 从 `ispip.m27.tech` 下载 21 个运营商/云厂商网段表到 `data/ispip/`（约 768KB）
+2. 从 `ispip.m27.tech` 下载 21 个运营商/云厂商网段表 + 3 个港澳台地域表到 `data/ispip/`
+   （约 768KB）；港澳台三页不做 ISP，enrich 用来定归属地，见下文
 3. 从 `ljxi/GeoCN` 下载离线库 `GeoCN.mmdb`（8.6MB）与行政区划编码表 `full.txt` 到 `data/geocn/`
 
 ```bash
@@ -253,7 +257,7 @@ go run ./cmd/ip2region parse -src data/qqwry.dat -db data/ip2region.db
    同时兼容原版连写格式 `中国广东省广州市番禺区`
 4. 规范化成"从 0.0.0.0 到 255.255.255.255 全覆盖、无重叠、无缝隙"的段表
 
-实测：`151 万原始记录 → 141 万段`，其中中国 19.2 万段 / 4.03 亿 IP。
+实测：`151 万原始记录 → 141 万段`（enrich 按边界切分后 366 万段），其中中国 4.06 亿 IP。
 
 ### legacy：把旧版 xdb 的境外省市搬回来
 
@@ -307,8 +311,13 @@ go run ./cmd/ip2region legacy -xdb old.xdb -include-cn         # 连国内一起
 省份就强制为 `中国|香港特别行政区` / `中国|澳门特别行政区` / `中国|台湾省`，
 即使 qifu/百度/qqwry 把它判成别的国家（真实案例：72.255.243.92 在香港表的
 `72.255.224.0/19` 里，但被 qqwry/qifu 判成美国加州）。纠正时挂错的市/区县/镇
-一并清掉，ISP 换成查询源对该 IP 的回答。与表有交集但归属不符的段会自动进入
-全量 enrich；一次性集中修正用 `enrich -only-hmt`。
+一并清掉。与表有交集但归属不符的段会自动进入全量 enrich；一次性集中修正用
+`enrich -only-hmt`。
+
+**ISP 在港澳台例外地以百度为准**：大陆是"百度补空/基础运营商之间才覆盖 → 网段表补空 → 纯真兜底"，
+非基础运营商的值不被覆盖（百度 ISP 常混公司名）；港澳台反过来——百度给的是干净运营商名
+（电讯盈科/中华电信/澳门电讯），而纯真常留陈年公司名甚至境外 ISP
+（Charter Communications、iBAHN网络），所以只要百度有 ISP 就直接用它。
 
 **探测布线：GeoCN 边界优先，片内再按 IP 数等分。**
 
@@ -323,13 +332,14 @@ GeoCN 切出 1678 片（西宁 / 广州 / 重庆 / 南宁 混杂，每片 256 IP
 所以顺序是：
 
 ```
-段 → 按 GeoCN 网段边界切 → 合并 < 2048 IP 的碎片 → 片内按 2048 等分 → 段内封顶 256 点
+段 → 按 GeoCN 网段边界切 → 合并 < 2048 IP 的碎片 → 片内每 256 IP 布一点 → 段内封顶 1024 点
 ```
 
 切出的每一格独立探测、独立决策，结论不同就把原段切开。GeoCN 未收录的区间保持原样。
 
-实测 19.2 万中国段 → 35.2 万片 → **27.4 万个去重探测点**（按 /24 合并），
-修正省 9,979 段、修正市 53,362 段。比纯等分多 9% 请求，但探测点落在真实网段里。
+实测港澳台定向刷新（`-only-hmt`）：17.2 万段 → 20.2 万片 → **19.7 万个去重探测点**，
+缓存命中 19.46 万（98.7%），1 分 5 秒跑完，真实请求只剩 2,617 次。
+全量重建（`-probe-step 256`）约 366 万段、340 万级探测点，45~50 分钟。
 
 > GeoCN 也有它看不出来的大段：`59.192.0.0/10`（419 万 IP）在 GeoCN 里就是一片
 > "北京市西城区"，百度 83 个探测点也全回北京。这段无解，任何数据源都认为它整段在北京。
@@ -338,8 +348,8 @@ GeoCN 切出 1678 片（西宁 / 广州 / 重庆 / 南宁 混杂，每片 256 IP
 # 试跑，只发 200 次请求，不写段表
 go run ./cmd/ip2region enrich -limit 200 -dry-run
 
-# 全量
-go run ./cmd/ip2region enrich -qps 60 -workers 12
+# 全量（默认值即可，自适应限速会自己爬）
+go run ./cmd/ip2region enrich
 
 # 只处理省市为空的段
 go run ./cmd/ip2region enrich -only-empty
@@ -365,30 +375,29 @@ go run ./cmd/ip2region enrich -only-empty
 | `-probe-seed` | 0 | 抖动种子：0=每次运行随机，固定值可复现同一次采样 |
 | `-min-piece` | 2048 | GeoCN 切片小于该值就与相邻片合并 |
 | `-only-empty` | false | 只处理省市缺失的段 |
-| `-only-hmt` | false | 定向修正：只重查与港澳台地域表有交集但归属不符的段 |
+| `-only-hmt` | false | 定向刷新：只处理与港澳台地域表有交集的段（修归属 + ISP 以百度为准）；配合缓存约 1 分钟 |
 | `-conflicts` | `build/enrich-conflicts.tsv` | ISP 冲突样例输出，空字符串则不写 |
 | `-timeout` | 10s | 单请求超时 |
 | `-progress` | 2000 | 每 N 条打一行进度 |
 
 **核心规则（改代码前务必读）：**
 
-- **默认只补空，不覆盖。** 实测百度在省市上的准确率和 qqwry 是同一量级
-  （40 个改动样本交叉验证：新值 82.1%、旧值 82.1%，完全打平），覆盖等于抛硬币。
-  真正的收益全在填空。
-- **云/CDN/IDC 段永远只补空**（`regions.IsCloudISP`）。腾讯云、阿里云、CloudFlare、
-  Akamai、BGP 多线、IDC 机房这类段的 IP 归属方是云厂商，但流量落在哪个 PoP 由路由决定，
-  百度探到的是 PoP 城市而不是网段归属地。实测 `1.12.0.0/14`（腾讯云）百度说北京，
-  qqwry 和另外两个独立源都说广东。这类段共 3,948 段 / 3,489 万 IP（中国空间 8.7%）。
+- **省市默认允许覆盖（`-override=true`），但有门控**：百度说换省却给不出市 → 整条不动
+  （低置信度）；云/CDN/IDC 段永远只补空（`regions.IsCloudISP`）。腾讯云、阿里云、
+  CloudFlare、Akamai、BGP 多线、IDC 机房这类段的归属方是云厂商，流量落在哪个 PoP 由路由
+  决定，百度探到的是 PoP 城市。实测 `1.12.0.0/14`（腾讯云）百度说北京，另两个独立源都说广东。
+- **港澳台不在大陆这套规则里**：省份以 ispip 地域表为准，ISP 只要百度有值就直接覆盖纯真
+  （见上文"港澳台归属优先级"）。
 - **省市被改写时，旧区县和镇一律清空**。挂在旧市下面的区县（如"长春市|玄武区"）在新市下
   不成立，先清掉再由 GeoCN 按新省市重填。
-- **ISP 先看运营商网段表，再考虑百度。** `data/ispip/` 是 APNIC 分配记录，判"归属方"比百度
-  可靠（见下节）。百度只负责填空。
-- **区/镇永不改动。** 百度和 qqwry 都给不出可靠的区镇信息。
-- **ISP 只补空。** 两边都有值但不同只记冲突，不写库——qqwry 的"腾讯云/网宿"
-  比百度的"电信"更细。
+- **区/镇永不改动。** 百度和 GeoCN 都给不出可靠的镇级信息。
+- **ISP 顺序（大陆）：百度补空/基础运营商之间才覆盖 → 网段表最后补空 → 纯真兜底。**
+  网段表是 APNIC 分配记录，但它**不主动覆盖纯真**——实测 30 万段里 77% 一致、20% 未收录、
+  2.5% 冲突，冲突样本全是纯真更细（"歌华有线" vs "中国广电"、"华为云" vs "中国电信"），
+  硬覆盖是降级。两边都有值又不同只记冲突，不写库。
 
-请求量：19.2 万中国段按 `/24` 去重后是 11.4 万个探测点，每个点查一次百度。
-30 QPS 约 1 小时，60 QPS 约 30 分钟。所有结果落 `ip_cache` 表，**重跑零请求**。
+请求量：`-probe-step 256` 下约 1 个 /24 一个探测点，全量 340 万级探测点（港澳台表内段也会进），
+缓存命中后重跑约 1 分钟。所有结果落 `ip_cache` 表，**重跑零请求**。
 
 ### 运营商网段表（ispip）
 
@@ -398,26 +407,33 @@ go run ./cmd/ip2region enrich -only-empty
 它和百度的本质区别：**这是分配归属，不是探测点位置**。所以 `1.12.0.0/14`（腾讯云）不会被
 说成"北京电信"，也不受 anycast / PoP 影响。
 
-**执行顺序：网段表定 ISP → 百度改省市 → GeoCN 补区县。** GeoCN 放在百度之后，
-因为它填区县前要先校验省市自洽，必须拿百度的最终值去校验。
-
-enrich 会先用它定 ISP：
+**执行顺序（enrich 里）：百度判省市 + 填 ISP → GeoCN 补区县 → 网段表最后只补空 ISP。**
+GeoCN 在百度之后，因为它填区县前要先校验省市自洽，必须拿百度的最终值去校验；
+网段表放最后，是因为它只该填空、不该改写已有结论。
 
 | 情况 | 动作 |
 |---|---|
-| 段的 ISP 为空，网段表有值 | 填（实测 1,437 段） |
-| 网段表判定为云/IDC（腾讯云、阿里云、华为云、网宿…），原值是基础运营商 | 纠正（实测 339 段） |
-| 两边都是基础运营商（电信↔联通） | 不动，歧义太大 |
-| 网段表没覆盖 | 交给百度填空 |
+| 段的 ISP 为空，网段表有值 | 填（实测累计补过 18,522 段 / 723 万 IP） |
+| 两边都有值但不同 | **不动**，只写入 `enrich-conflicts.tsv` |
+| 网段表没覆盖 | 保留百度/纯真的值 |
+
+**为什么不主动覆盖**：30 万个国内段抽样（段中点查表）——77.1% 一致、20.4% 未收录、
+**2.5% 冲突**，而冲突样本基本是纯真更细：
+
+```
+纯真=歌华有线   网段表=中国广电     歌华是广电旗下，纯真更准
+纯真=华为云     网段表=中国电信     华为云段被电信的 /14 包住
+纯真=方正宽带   网段表=腾讯云       方正宽带是运营商，不是云
+```
+
+硬按"网段表 > 纯真"覆盖会把这 2.5% 退化成大桶名。它的价值在**补空**（20% 的段查不到）。
 
 优先级设计：云厂商/IDC（40）> 教育网/科技网/广电（20）> 基础运营商（10）。
 不这样排的话，运营商列表会把云厂商的段抢走——同一个 `1.12.0.0/14` 在电信和腾讯云两个列表里都有。
 
-**不收录 `othernet` / `hongkong` / `macau` / `taiwan` 四个页面**：它们是地域兜底桶，不是运营商，
-拿来当 ISP 会把"台湾某固网"写成"台湾"。
-
-实测它的判断和 qqwry 的 ISP 一致率 91.1%（有覆盖的段中），分歧里有 284 段是
-"qqwry 说长城宽带、网段表说腾讯云"——这类是真实转售关系，按优先级改对了。
+**`othernet` / `hongkong` / `macau` / `taiwan` 四页不当 ISP**：它们是地域兜底桶，不是运营商，
+拿来当 ISP 会把"台湾某固网"写成"台湾"。其中港澳台三页另有用途——enrich 用它们定归属地
+（见上文"港澳台归属优先级"），ISP 则用百度。
 
 ### 备用源：高德（只补百度缺的省市）
 
@@ -437,7 +453,7 @@ enrich 会先用它定 ISP：
 | 我们单次重建消耗 | **17,615 次** |
 | 结论 | 免费额度内，**一年 0 成本** |
 
-全量走 25 万探测点的话一次就超个人额度，所以**只在缺口上发力**——这是关键设计。
+全量走 340 万探测点的话一次就超个人额度，所以**只在缺口上发力**——这是关键设计。
 
 启用方式（Key 去 https://console.amap.com/dev/key/app 申请，选「Web服务」类型）：
 
@@ -515,7 +531,7 @@ go run ./cmd/ip2region enrich -qps 60 -amap-key 你的key
 
 - 更新"随缘"（README 原话），当前库是 2026-04 的，可能滞后
 - ISP 只有 7 种粗标签（电信/联通/移动/鹏博士/教育网/广电），比网段表粗，所以不用它判 ISP
-- 不覆盖港澳台（只含中国大陆）
+- 港澳台有编码，但命名与库内不一致（`香港` vs `香港特别行政区`），过不了省市自洽校验，实际不在港澳台生效
 - 云厂商段同样会给出 PoP 城市，与百度一个毛病
 
 ### refine：边界递归收敛
@@ -657,7 +673,7 @@ go run ./cmd/ip2region build -from txt -policy btree
 | `-out` | `build/ip2region.xdb` | 输出 xdb |
 | `-policy` | `vector` | 索引策略 `vector` 或 `btree` |
 
-实测：141 万段 → 22.1MB xdb，9 秒。
+实测：366 万段 → 约 60MB xdb，20 秒。
 
 ### verify：校验与对拍
 
@@ -774,34 +790,46 @@ http://127.0.0.1:8899/?text=1.1.1.1%0A8.8.8.8
 
 ---
 
-## 发布更新（同步到 xdb 仓库）
+## 发布更新（GitHub Release + 同步上线）
 
-xdb 产物放在独立仓库 `ip2region_update`（`ip2region_update/` 目录，独立的 git 仓库，
-已在本仓库 `.gitignore` 里排除），源码仓库不存 22MB 的二进制。
+xdb 约 60MB，**不进仓库**，按版本打 GitHub Release 分发。注意 GitHub 上
+`hel2o/ip2region` 会重定向到实际仓库 `hel2o/ip2region_update`，API 调用两种写法都行。
 
 ### 一次完整更新
 
 ```bash
-# ① 在源码仓库生成（等价于一条 ./rebuild.sh，下面展开写便于定位问题）
+# ① 生成（等价于一条 ./rebuild.sh，展开写便于定位问题）
 ./rebuild.sh                            # = fetch → parse → legacy → enrich → refine → merge → build → verify → stats
 
 # 也可以逐步跑，方便单步调参：
 go run ./cmd/ip2region fetch            # 打印数据版本号，例如 20261028
 go run ./cmd/ip2region parse
-go run ./cmd/ip2region enrich -qps 60
-go run ./cmd/ip2region refine -qps 60
-go run ./cmd/ip2region merge
+go run ./cmd/ip2region enrich           # 默认 100 QPS 自适应，45~50 分钟
+go run ./cmd/ip2region merge            # 注入版本探针
 go run ./cmd/ip2region build -from txt
 go run ./cmd/ip2region verify -n 50000  # 必须通过（覆盖 IP = 4294967296）
-go run ./cmd/ip2region stats            # 记下覆盖率，要写进发布 README
+go run ./cmd/ip2region stats            # 记下覆盖率，要写进 Release 说明
 
-# ② 拷进发布仓库
-cd ip2region_update
-rm -f ip2region_*.xdb                                # 只保留最新一份
-cp ../build/ip2region.xdb ./ip2region_<数据版本>.xdb   # 用 fetch 打印的版本号，不是当天日期
-# 更新 README.md 里的版本号 / 文件大小 / 覆盖率
-git add -A && git commit -m "更新 xdb: <数据版本>" && git push origin main
+# ② 推送源码（两个远程一起推；内网 git 要绕代理）
+git push origin master
+NO_PROXY=git.clifford.cn no_proxy=git.clifford.cn git push origin master
+
+# ③ 打 Release 并上传资产（没装 gh CLI，走 API；token 从 git 凭据取）
+TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | grep ^password= | cut -d= -f2)
+curl -sL -X POST https://api.github.com/repos/hel2o/ip2region/releases \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"tag_name":"v<数据版本>","target_commitish":"master","name":"v<数据版本>","body":"变更 + md5 + 探针 + verify 指标"}'
+curl -sL -X POST "https://uploads.github.com/repos/hel2o/ip2region_update/releases/<release_id>/assets?name=ip2region_<数据版本>.xdb" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" \
+  --data-binary @build/ip2region.xdb
+
+# ④ 同步上线（见下节）
+./sync.sh
 ```
+
+两个坑：API 首次调用会 301 到 `repositories/<id>/...`，curl 必须带 `-L`；
+Release 资产命名统一 `ip2region_<数据版本>.xdb`（`v20261106` 那次传的是
+`ip2region.xdb`，下次起带上版本号）。
 
 ### 两条硬要求
 
@@ -950,23 +978,25 @@ HTTP 404 会提示「服务端还没发布 /xdb/reload」；`management-system` 
 
 | 字段 | 纯 qqwry | 跑完 enrich | 来源 |
 |---|---|---|---|
-| 省 | 95.84% | **99.08%** | qqwry + 百度补空 |
-| 市 | 81.18% | **91.54%** | qqwry + 百度补空 |
-| 区县 | 4.67% | **41.16%** | qqwry + GeoCN 按边界切分补空 |
-| 乡镇 | 15.01% | 13.95% | 只有 qqwry 有（GeoCN 没有镇级） |
-| ISP | 85.00% | **90.48%** | qqwry + 网段表 + 百度补空 |
+| 省 | 95.84% | **99.95%** | qqwry + 百度（覆盖/补空）+ 港澳台表 |
+| 市 | 81.18% | **99.17%** | qqwry + 百度（覆盖/补空） |
+| 区县 | 4.67% | **44.02%** | qqwry + GeoCN 按边界切分补空 |
+| 乡镇 | 15.01% | 11.24% | 只有 qqwry 有（GeoCN 没有镇级），省市改写时会清掉再补不回来 |
+| ISP | 85.00% | **96.26%** | qqwry + 百度 + 网段表补空 |
+
+> 2026-11-06 实测，中国空间 4.06 亿 IP（1,529,220 段）加权。
 
 ### 三个硬限制，先说清楚
 
-1. **乡镇覆盖率低（14.55%），这是数据源的天花板。**
-   区县靠 GeoCN 提到了 40.65%，但**镇级没有任何源提供**——qqwry 的 area 字段偶尔有，
+1. **乡镇覆盖率低（11.24%），这是数据源的天花板。**
+   区县靠 GeoCN 提到了 44.02%，但**镇级没有任何源提供**——qqwry 的 area 字段偶尔有，
    百度、GeoCN、运营商网段表都没有。要镇级精度只能靠自定义覆盖。
-   剩下的 59% 区县空缺，是因为 GeoCN 本身只到市级（10.4 万片），
-   或省市与我们不一致而主动放弃（24 万片）。
+   剩下的 56% 区县空缺，是因为 GeoCN 本身只到市级，或省市与我们不一致而主动放弃。
 
-2. **百度不能用来覆盖已有值。**
-   交叉验证（ipwho.is / ipapi.is / ip-api 三个独立源）显示，百度与 qqwry 在省市上
-   是同一量级的噪声源，覆盖等于抛硬币。所以默认只补空。
+2. **百度的覆盖必须带门控。**
+   交叉验证（ipwho.is / ipapi.is / ip-api 三个独立源）显示，百度与 qqwry 在省市上是
+   同一量级的噪声源，所以覆盖只在"百度给出了完整省市"时生效（换省必须同时给市），
+   云段、港澳台以外的 ISP 都另有规则兜底——不是无脑覆盖。
 
 3. **境外段没有增强。**
    百度对境外只返回国家（`8.8.8.8 → "美国"`），比 qqwry 的
@@ -1074,7 +1104,7 @@ cBuff, err := xdb.LoadContentFromFile("build/ip2region.xdb")
 searcher, err := xdb.NewWithBuffer(cBuff)
 ```
 
-内存占用就是文件大小（约 22MB）。注意 `Searcher` 不是并发安全的，每个 goroutine 一个实例。
+内存占用就是文件大小（约 60MB）。注意 `Searcher` 不是并发安全的，每个 goroutine 一个实例。
 
 ---
 
@@ -1091,14 +1121,14 @@ A：正常，进度每 2000 条才打一行。真卡住看是不是被限流（�
 A：删掉 `data/ip2region.db` 重新 `parse`。只想丢掉外部查询结果的话，清空 `ip_cache` 表即可。
 
 **Q：能不能只用 qqwry，不调百度？**
-A：可以。跳过 `enrich` 和 `refine`，直接 `merge` + `build`。代价是市覆盖率 81% 而不是 91%。
+A：可以。跳过 `enrich` 和 `refine`，直接 `merge` + `build`。代价是市覆盖率 81% 而不是 99%。
 
 **Q：能不能换高德/ip138 数据源？**
 A：`internal/provider` 是接口化的。实现 `Provider`（`Name()` + `Lookup()`），
 在 `cmd/ip2region/enrich.go` 里换一行构造，enrich/refine 主流程不用改。
 
 **Q：xdb 多大？能压吗？**
-A：22MB，主要是 region 字符串。每个段都要存完整区域串，压不动多少。
+A：约 60MB（300 万段），主要是 region 字符串。每个段都要存完整区域串，压不动多少。
 想小一点只能用 `build -policy btree`（索引略小，查询稍慢）。
 
 **Q：`verify` 的"真冲突 1.31%"要不要处理？**
@@ -1128,10 +1158,12 @@ internal/regions/       行政区划切分、ISP 归一（含港澳台运营商�
 internal/store/         SQLite：段表 / ip_cache / meta
 internal/provider/      外部数据源接口 + 百度实现
 internal/legacy/        旧版 xdb 读取（境外省市补丁）
-internal/ispip/         运营商网段表解析（APNIC 分配归属）
+internal/ispip/         运营商网段表（APNIC 分配归属）+ 港澳台地域表（hmt.go）
 internal/geocn/         GeoCN MMDB 读取 + 行政区划编码翻译
 internal/enrich/        /24 去重、限流、缓存复用、冲突裁定
 internal/refine/        大段二分收敛细分
+cmd/seedfill/           一次性工具：用历史库回填省市（人工跑）
+cmd/atest/              固定 vs 自适应限速的吞吐对比（人工跑）
 internal/xdbmaker/      官方 xdb maker + searcher（Apache 2.0，收编进仓库自包含）
 
 data/
