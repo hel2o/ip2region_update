@@ -133,3 +133,45 @@ func TestSanitizeStripsPipeAndStar(t *testing.T) {
 		t.Fatalf("星号未清理: %s", got)
 	}
 }
+
+// TestApplyNestedOverride 覆盖"窄规则切进宽规则"的嵌套场景。
+//
+// 真实踩坑：manual.txt 先有一条 183.12.0.0-183.13.227.255 的宽规则（只到市），
+// 后面又给其中几个 /32 单独标区县。旧实现一次遍历 base，窄规则切不进已经
+// 应用过的宽规则结果，merge 直接报「第 N 段与第 N+1 段重叠」失败。
+func TestApplyNestedOverride(t *testing.T) {
+	base := Normalize([]Segment{seg(0, 0xFFFFFFFF, "中国|广东省|广州市|||中国电信")})
+	over := []Segment{
+		seg(1000, 9000, "中国|广东省|广州市|番禺区||中国电信"),   // 宽规则
+		seg(2000, 2000, "中国|广东省|广州市|天河区||中国电信"),   // 窄规则落在宽规则里
+		seg(5000, 5001, "中国|广东省|广州市|越秀区||中国电信"),   // 另一段窄规则
+	}
+	got := Apply(base, over)
+	if err := Validate(got); err != nil {
+		t.Fatalf("嵌套覆盖结果未通过校验: %v", err)
+	}
+	cases := map[uint32]string{
+		999:  "",
+		1000: "番禺区",
+		1999: "番禺区",
+		2000: "天河区",
+		2001: "番禺区",
+		5000: "越秀区",
+		5001: "越秀区",
+		5002: "番禺区",
+		9000: "番禺区",
+		9001: "",
+	}
+	for ip, want := range cases {
+		f := Find(got, ip)
+		if f == nil {
+			t.Fatalf("%d 查不到段", ip)
+		}
+		if f.Geo.County != want {
+			t.Fatalf("%d 的区县应为 %q，实际 %q", ip, want, f.Geo.County)
+		}
+	}
+	if CountIPs(got) != 1<<32 {
+		t.Fatalf("覆盖 IP 数应保持不变，实际 %d", CountIPs(got))
+	}
+}

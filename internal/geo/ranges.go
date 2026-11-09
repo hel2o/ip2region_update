@@ -84,6 +84,11 @@ func Normalize(segs []Segment) []Segment {
 //
 // base 必须是 Normalize 产物。over 内部重叠时后出现者优先。
 // 结果保持全覆盖且无重叠。
+//
+// 逐条应用（而不是一次遍历 base）是为了支持**嵌套覆盖**：manual.txt 里
+// 先有一条宽规则 183.12.0.0-183.13.227.255，后面再给其中几个 /32 单独标区县，
+// 后出现的窄规则必须能切开前面已经应用的结果——一次遍历做不到这一点，
+// 会产出重叠段（merge 会报「第 N 段与第 N+1 段重叠」直接失败）。
 func Apply(base, over []Segment) []Segment {
 	if len(over) == 0 {
 		return base
@@ -92,45 +97,52 @@ func Apply(base, over []Segment) []Segment {
 	copy(o, over)
 	sort.SliceStable(o, func(i, j int) bool { return o[i].Start < o[j].Start })
 
-	// 复制一份 base，避免原地修改调用方的数据。
 	cur := make([]Segment, len(base))
 	copy(cur, base)
-
-	out := make([]Segment, 0, len(base)+len(o))
-	i := 0
 	for _, ov := range o {
 		if ov.Invalid() {
 			continue
 		}
-		for i < len(cur) && cur[i].End < ov.Start {
-			out = append(out, cur[i])
-			i++
-		}
-		if i >= len(cur) {
-			break
-		}
-		if cur[i].Start > ov.End {
-			out = append(out, ov)
-			continue
-		}
-		if cur[i].Start < ov.Start {
-			left := cur[i]
-			left.End = ov.Start - 1
-			out = append(out, left)
-			cur[i].Start = ov.Start
-		}
-		for i < len(cur) && cur[i].End <= ov.End {
-			i++
-		}
-		if i < len(cur) && cur[i].Start <= ov.End {
-			cur[i].Start = ov.End + 1
-		}
-		out = append(out, ov)
+		cur = applyOne(cur, ov)
 	}
-	for ; i < len(cur); i++ {
-		out = append(out, cur[i])
+	return cur
+}
+
+// applyOne 把单条覆盖并入已规范化的 cur，保持无重叠、升序。
+//
+// 只用二分定位 + 局部三拆，不整体重排。
+func applyOne(cur []Segment, ov Segment) []Segment {
+	i := sort.Search(len(cur), func(k int) bool { return cur[k].End >= ov.Start })
+	if i == len(cur) {
+		return cur
 	}
-	return out
+	j := i
+	for j < len(cur) && cur[j].Start <= ov.End {
+		j++
+	}
+
+	var left, right *Segment
+	if cur[i].Start < ov.Start {
+		l := cur[i]
+		l.End = ov.Start - 1
+		left = &l
+	}
+	if j > i && cur[j-1].End > ov.End {
+		r := cur[j-1]
+		r.Start = ov.End + 1
+		right = &r
+	}
+
+	out := make([]Segment, 0, len(cur)-(j-i)+3)
+	out = append(out, cur[:i]...)
+	if left != nil {
+		out = append(out, *left)
+	}
+	out = append(out, ov)
+	if right != nil {
+		out = append(out, *right)
+	}
+	return append(out, cur[j:]...)
 }
 
 // Compact 合并相邻且归属完全相同的段，返回可能更短的段表。
