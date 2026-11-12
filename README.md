@@ -4,7 +4,7 @@
 融合多个数据源补齐省市、区县与运营商信息，**全量覆盖 42.9 亿个 IPv4 地址**。
 
 **数据文件在 [Releases](../../releases) 页面下载**（每版一个 `ip2region_<版本>.xdb`，约 60MB），
-仓库本身不存放 xdb。当前最新版本 **20261109**。
+仓库本身不存放 xdb。当前最新版本 **20261112**。
 
 > 版本号取自库内探针（见下文「版本识别」），文件名即版本，下载最新 Release 里的 xdb 即可。
 
@@ -27,7 +27,7 @@ Go 查询示例（官方 binding）：
 ```go
 import "github.com/lionsoul2014/ip2region/binding/golang/xdb"
 
-searcher, _ := xdb.NewWithFileOnly("ip2region_20261109.xdb")
+searcher, _ := xdb.NewWithFileOnly("ip2region_20261112.xdb")
 defer searcher.Close()
 
 region, _ := searcher.SearchByStr("14.215.177.38")
@@ -47,7 +47,7 @@ parts := strings.SplitN(region, "|", 6)
 ```go
 region, _ := searcher.SearchByStr("255.255.255.255")
 // 老库返回 "纯真网络|||||保留地址"
-// 本库返回 "|20261109|2026-11-09 19:10|||"（省位=版本日期，市位=生成时刻）
+// 本库返回 "|20261112|2026-11-12 08:38|||"（省位=版本日期，市位=生成时刻）
 ```
 
 加载端可据此判断当前加载的是哪一版数据。
