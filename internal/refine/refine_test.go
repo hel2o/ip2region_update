@@ -158,9 +158,9 @@ func TestRefineCloudSegmentNotOverridden(t *testing.T) {
 }
 
 func TestApplyToKeepsCountyAndFillsISP(t *testing.T) {
-	old := geo.GeoInfo{Country: "中国", Province: "广东省", City: "广州", County: "越秀区", Town: "农林"}
+	old := geo.GeoInfo{Country: "中国", Province: "广东省", City: "广州", County: "番禺区", Town: "钟村"}
 	out := applyTo(provider.Result{Province: "广东省", City: "广州市", ISP: "中国联通"}, old)
-	if out.County != "越秀区" || out.Town != "农林" {
+	if out.County != "番禺区" || out.Town != "钟村" {
 		t.Fatalf("区镇必须保留: %+v", out)
 	}
 	if out.ISP != "中国联通" {

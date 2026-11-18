@@ -23,7 +23,7 @@ func TestQifuLookup(t *testing.T) {
 		}
 		switch r.URL.Query().Get("ip") {
 		case "180.101.49.11": // 省 + 市
-			_, _ = w.Write([]byte(`{"code":200,"message":"success","data":{"country":"中国","province":"广东省","city":"南京市","isp":"中国电信","scene":"IDC","query_ip":"180.101.49.11","version":"v4"}}`))
+			_, _ = w.Write([]byte(`{"code":200,"message":"success","data":{"country":"中国","province":"江苏省","city":"南京市","isp":"中国电信","scene":"IDC","query_ip":"180.101.49.11","version":"v4"}}`))
 		case "202.108.22.5": // 直辖市：city 为 null，City 应回填成省级
 			_, _ = w.Write([]byte(`{"code":200,"message":"success","data":{"country":"中国","province":"北京市","city":null,"isp":"中国联通","query_ip":"202.108.22.5","version":"v4"}}`))
 		case "203.198.0.1": // 特别行政区
@@ -45,13 +45,13 @@ func TestQifuLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Country != "中国" || res.Province != "广东省" || res.City != "南京市" || res.ISP != "中国电信" {
+	if res.Country != "中国" || res.Province != "江苏省" || res.City != "南京市" || res.ISP != "中国电信" {
 		t.Fatalf("省市结果不符: %+v", res)
 	}
 	if res.County != "" {
 		t.Fatalf("区县必须留空（qifu 给不出），实际 %q", res.County)
 	}
-	if res.Raw != "中国广东省南京市 中国电信" {
+	if res.Raw != "中国江苏省南京市 中国电信" {
 		t.Fatalf("Raw 不符: %q", res.Raw)
 	}
 

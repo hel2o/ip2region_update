@@ -106,8 +106,8 @@ func TestDecidePart(t *testing.T) {
 
 	t.Run("改市时清空旧区县和镇", func(t *testing.T) {
 		base := gi("广东省", "广州", "中国电信")
-		base.County = "越秀区"
-		base.Town = "农林"
+		base.County = "姑苏区"
+		base.Town = "平江"
 		out, k, _ := decidePart(base,
 			provider.Result{Province: "广东省", City: "深圳市"}, true)
 		if out.City != "深圳市" {
@@ -179,7 +179,7 @@ func TestMergeSmallSlices(t *testing.T) {
 
 func TestTrimAdminSuffix(t *testing.T) {
 	cases := map[string]string{
-		"广州市": "广州", "广州": "广州", "越秀区": "越秀",
+		"广州市": "广州", "广州": "广州", "姑苏区": "姑苏",
 		"内蒙古自治区": "内蒙古", "香港特别行政区": "香港",
 	}
 	for in, want := range cases {

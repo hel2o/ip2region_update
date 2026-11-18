@@ -39,7 +39,7 @@ func TestSeedFromDB(t *testing.T) {
 	segs := []geo.Segment{
 		mkSeg(100, 199, "台湾省", "", "中华电信"),    // 省在、市空 → 补市
 		mkSeg(200, 299, "", "", "中国电信"),       // 省市都空 → 都补
-		mkSeg(300, 399, "广东省", "", "中国电信"),    // 省冲突 → 不动
+		mkSeg(300, 399, "江苏省", "", "中国电信"),    // 省冲突 → 不动
 		mkSeg(400, 499, "广东省", "广州市", "中国电信"), // 已有值 → 不动
 	}
 	ups, fp, fc, err := SeedFromDB(segs, oldPath)
