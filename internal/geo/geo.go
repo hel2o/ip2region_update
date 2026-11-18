@@ -1,7 +1,7 @@
 // Package geo 定义 IP 段归属的统一数据模型。
 //
 // 输出区域串固定为 6 段：国|省|市|区|镇|ISP，
-// 例如：中国|广东省|广州市|番禺区|钟村|中国电信
+// 例如：中国|江苏省|苏州市|姑苏区|平江|中国电信
 //
 // 注意：官方 ip2region SDK 的 Region 结构按 5 段解析，本库不兼容那条路径，
 // 查询侧必须自行 SplitN(s, "|", 6)。
@@ -20,8 +20,8 @@ type GeoInfo struct {
 	Country  string // 中国 / 美国 / IANA
 	Province string // 广东省
 	City     string // 广州市
-	County   string // 番禺区
-	Town     string // 钟村
+	County   string // 姑苏区
+	Town     string // 平江街道
 	ISP      string // 中国电信
 }
 

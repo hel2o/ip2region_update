@@ -44,8 +44,8 @@ func TestCleanGeo(t *testing.T) {
 		},
 		{
 			name: "正常数据不动",
-			in:   geo.GeoInfo{Country: "中国", Province: "广东省", City: "广州市", County: "番禺区", ISP: "中国电信"},
-			want: geo.GeoInfo{Country: "中国", Province: "广东省", City: "广州市", County: "番禺区", ISP: "中国电信"},
+			in:   geo.GeoInfo{Country: "中国", Province: "广东省", City: "广州市", County: "姑苏区", ISP: "中国电信"},
+			want: geo.GeoInfo{Country: "中国", Province: "广东省", City: "广州市", County: "姑苏区", ISP: "中国电信"},
 		},
 		{
 			name: "吉林省吉林市不算重复",
