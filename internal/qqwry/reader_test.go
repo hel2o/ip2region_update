@@ -88,7 +88,7 @@ func makeSynthetic(t *testing.T) []byte {
 		strOffsets[s] = off
 		if strings_HasPrefix01(s) {
 			// 内联记录：114 案例的 0x01 跳转目标 = 国家\0 + 地区\0
-			strArea.Write(cstr("中国江苏省南京市"))
+			strArea.Write(cstr("中国广东省南京市"))
 			strArea.Write(cstr("联通"))
 			return off
 		}
@@ -140,7 +140,7 @@ func TestParseSynthetic(t *testing.T) {
 	want := []Record{
 		{Start: ip("1.0.1.0"), End: ip("1.0.3.255"), Country: "中国广东省广州市", Area: "电信"},
 		{Start: ip("8.8.8.0"), End: ip("8.8.8.255"), Country: "美国", Area: "谷歌"},
-		{Start: ip("114.114.0.0"), End: ip("114.114.114.255"), Country: "中国江苏省南京市", Area: "联通"},
+		{Start: ip("114.114.0.0"), End: ip("114.114.114.255"), Country: "中国广东省南京市", Area: "联通"},
 		{Start: ip("223.5.5.0"), End: ip("223.5.5.255"), Country: "中国浙江省杭州市", Area: "阿里云"},
 		{Start: ip("10.0.0.0"), End: ip("10.255.255.255"), Country: "保留地址", Area: ""},
 	}

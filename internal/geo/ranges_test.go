@@ -15,8 +15,8 @@ func seg(start, end uint32, s string) Segment {
 
 func TestNormalizeFillsGapsAndClips(t *testing.T) {
 	in := []Segment{
-		seg(10, 20, "中国|江苏省|苏州市|姑苏区|平江|中国电信"),
-		seg(15, 30, "中国|广东省|广州市|吴中区||中国电信"), // 与上段重叠
+		seg(10, 20, "中国|广东省|广州市|越秀区|农林|中国电信"),
+		seg(15, 30, "中国|广东省|广州市|天河区||中国电信"), // 与上段重叠
 		seg(50, 60, "美国|||"), // 中间留空洞
 	}
 	got := Normalize(in)
@@ -29,18 +29,18 @@ func TestNormalizeFillsGapsAndClips(t *testing.T) {
 	if CountIPs(got) != 1<<32 {
 		t.Fatalf("覆盖 IP 数应为 2^32，实际 %d", CountIPs(got))
 	}
-	// 重叠按先到先得：10..20 保持姑苏区，21..30 才轮到吴中区
-	if f := Find(got, 17); f == nil || f.Geo.County != "姑苏区" {
-		t.Fatalf("17 应保留姑苏区，实际 %+v", f)
+	// 重叠按先到先得：10..20 保持越秀区，21..30 才轮到天河区
+	if f := Find(got, 17); f == nil || f.Geo.County != "越秀区" {
+		t.Fatalf("17 应保留越秀区，实际 %+v", f)
 	}
-	if f := Find(got, 25); f == nil || f.Geo.County != "吴中区" {
-		t.Fatalf("25 应落在吴中区，实际 %+v", f)
+	if f := Find(got, 25); f == nil || f.Geo.County != "天河区" {
+		t.Fatalf("25 应落在天河区，实际 %+v", f)
 	}
 }
 
 func TestApplyOverlayWins(t *testing.T) {
-	base := Normalize([]Segment{seg(0, 0xFFFFFFFF, "中国|江苏省|苏州市|姑苏区||中国电信")})
-	over := []Segment{seg(100, 199, "中国|江苏省|苏州市|平江||中国移动")}
+	base := Normalize([]Segment{seg(0, 0xFFFFFFFF, "中国|广东省|广州市|越秀区||中国电信")})
+	over := []Segment{seg(100, 199, "中国|广东省|广州市|农林||中国移动")}
 	got := Apply(base, over)
 	if err := Validate(got); err != nil {
 		t.Fatalf("Apply 结果未通过校验: %v", err)
@@ -68,15 +68,15 @@ func TestApplyOverlaySpanningMultipleBaseSegments(t *testing.T) {
 		seg(100, 199, "中国|广东省|深圳市|||中国电信"),
 		seg(200, 299, "中国|广东省|东莞市|||中国电信"),
 	})
-	over := []Segment{seg(50, 250, "中国|江苏省|苏州市|姑苏区|平江|中国电信")}
+	over := []Segment{seg(50, 250, "中国|广东省|广州市|越秀区|农林|中国电信")}
 	got := Apply(base, over)
 	if err := Validate(got); err != nil {
 		t.Fatalf("校验失败: %v", err)
 	}
 	for _, ip := range []uint32{50, 100, 200, 250} {
 		f := Find(got, ip)
-		if f == nil || f.Geo.Town != "平江" {
-			t.Fatalf("%d 应被覆盖为平江，实际 %+v", ip, f)
+		if f == nil || f.Geo.Town != "农林" {
+			t.Fatalf("%d 应被覆盖为农林，实际 %+v", ip, f)
 		}
 	}
 	f := Find(got, 251)
@@ -86,8 +86,8 @@ func TestApplyOverlaySpanningMultipleBaseSegments(t *testing.T) {
 }
 
 func TestCompactMergesIdenticalNeighbours(t *testing.T) {
-	s := "中国|江苏省|苏州市|姑苏区|平江|中国电信"
-	in := []Segment{seg(0, 9, s), seg(10, 19, s), seg(20, 29, "中国|广东省|广州市|吴中区||中国电信")}
+	s := "中国|广东省|广州市|越秀区|农林|中国电信"
+	in := []Segment{seg(0, 9, s), seg(10, 19, s), seg(20, 29, "中国|广东省|广州市|天河区||中国电信")}
 	got := Compact(in)
 	if len(got) != 2 {
 		t.Fatalf("应合并为 2 段，实际 %d 段: %+v", len(got), got)
@@ -109,8 +109,8 @@ func TestValidateRejectsHoles(t *testing.T) {
 }
 
 func TestGeoStringShape(t *testing.T) {
-	g := GeoInfo{Country: "中国", Province: "广东省", City: "广州市", County: "姑苏区", Town: "平江", ISP: "中国电信"}
-	want := "中国|广东省|广州市|姑苏区|平江|中国电信"
+	g := GeoInfo{Country: "中国", Province: "广东省", City: "广州市", County: "越秀区", Town: "农林", ISP: "中国电信"}
+	want := "中国|广东省|广州市|越秀区|农林|中国电信"
 	if got := g.String(); got != want {
 		t.Fatalf("String 输出不符:\n got=%s\nwant=%s", got, want)
 	}
@@ -142,9 +142,9 @@ func TestSanitizeStripsPipeAndStar(t *testing.T) {
 func TestApplyNestedOverride(t *testing.T) {
 	base := Normalize([]Segment{seg(0, 0xFFFFFFFF, "中国|广东省|广州市|||中国电信")})
 	over := []Segment{
-		seg(1000, 9000, "中国|江苏省|苏州市|姑苏区||中国电信"),   // 宽规则
-		seg(2000, 2000, "中国|广东省|广州市|吴中区||中国电信"),   // 窄规则落在宽规则里
-		seg(5000, 5001, "中国|广东省|广州市|相城区||中国电信"),   // 另一段窄规则
+		seg(1000, 9000, "中国|广东省|广州市|越秀区||中国电信"),   // 宽规则
+		seg(2000, 2000, "中国|广东省|广州市|天河区||中国电信"),   // 窄规则落在宽规则里
+		seg(5000, 5001, "中国|广东省|广州市|白云区||中国电信"),   // 另一段窄规则
 	}
 	got := Apply(base, over)
 	if err := Validate(got); err != nil {
@@ -152,14 +152,14 @@ func TestApplyNestedOverride(t *testing.T) {
 	}
 	cases := map[uint32]string{
 		999:  "",
-		1000: "姑苏区",
-		1999: "姑苏区",
-		2000: "吴中区",
-		2001: "姑苏区",
-		5000: "相城区",
-		5001: "相城区",
-		5002: "姑苏区",
-		9000: "姑苏区",
+		1000: "越秀区",
+		1999: "越秀区",
+		2000: "天河区",
+		2001: "越秀区",
+		5000: "白云区",
+		5001: "白云区",
+		5002: "越秀区",
+		9000: "越秀区",
 		9001: "",
 	}
 	for ip, want := range cases {
